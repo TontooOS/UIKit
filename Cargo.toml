@@ -1,0 +1,16 @@
+[package]
+name = "tontoo-uikit"
+version = "0.3.0"
+edition = "2021"
+license = "MIT"
+description = "Lightweight, native Rust UI toolkit for TontooOS with a UIKit-Dynamics-style animation engine"
+readme = "README.md"
+keywords = ["tontoo", "ui", "gtk4", "compositor", "animation"]
+categories = ["gui"]
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
+glib = "0.20"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]

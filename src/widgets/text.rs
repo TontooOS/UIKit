@@ -1,0 +1,195 @@
+//! Text widget — displays text using GtkLabel with Pango rendering.
+
+use crate::style::{Color, Font, FontWeight, Padding};
+use crate::widget::{Position, PositionMode, Widget, WidgetId, next_widget_id};
+use gtk::prelude::*;
+use gtk::{self, Label};
+
+pub struct Text {
+    id: WidgetId,
+    content: String,
+    font: Font,
+    color: Color,
+    max_width: Option<f32>,
+    position_mode: PositionMode,
+    position: Position,
+}
+
+impl Text {
+    pub fn new(content: impl Into<String>) -> Self {
+        Self {
+            id: next_widget_id(),
+            content: content.into(),
+            font: Font::default(),
+            color: Color::new(0.92, 0.92, 0.94, 1.0),
+            max_width: None,
+            position_mode: PositionMode::Auto,
+            position: Position::new(),
+        }
+    }
+
+    pub fn at(mut self, x: f32, y: f32) -> Self {
+        self.position_mode = PositionMode::Absolute;
+        self.position.x = Some(x);
+        self.position.y = Some(y);
+        self
+    }
+
+    pub fn size(mut self, width: f32, height: f32) -> Self {
+        self.position.width = Some(width);
+        self.position.height = Some(height);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.position.width = Some(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.position.height = Some(height);
+        self
+    }
+
+    pub fn font_size(mut self, size: f32) -> Self {
+        self.font.size = size;
+        self
+    }
+
+    pub fn font_family(mut self, family: impl Into<String>) -> Self {
+        self.font.family = family.into();
+        self
+    }
+
+    pub fn bold(mut self) -> Self {
+        self.font.weight = FontWeight::Bold;
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = color;
+        self
+    }
+
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.max_width = Some(width);
+        self
+    }
+
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    fn weight_to_pango(&self) -> &str {
+        match self.font.weight {
+            FontWeight::Thin => "ultralight",
+            FontWeight::Light => "light",
+            FontWeight::Regular => "normal",
+            FontWeight::Medium => "medium",
+            FontWeight::Semibold => "semibold",
+            FontWeight::Bold => "bold",
+            FontWeight::Heavy => "heavy",
+        }
+    }
+}
+
+impl Widget for Text {
+    fn id(&self) -> WidgetId {
+        self.id
+    }
+
+    fn position_mode(&self) -> PositionMode {
+        self.position_mode
+    }
+
+    fn position(&self) -> Position {
+        self.position
+    }
+
+    fn to_gtk(&self) -> gtk::Widget {
+        let label = Label::new(Some(&self.content));
+
+        let font_desc = format!("{} {} {}", self.font.family, self.font.size, self.weight_to_pango());
+        label.set_use_markup(true);
+        label.set_markup(&format!(
+            "<span font_desc=\"{}\" foreground=\"{}\">{}</span>",
+            font_desc,
+            self.color_hex(),
+            glib::markup_escape_text(&self.content),
+        ));
+
+        if let Some(max_w) = self.max_width {
+            label.set_width_chars((max_w / (self.font.size * 0.6)) as i32);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        }
+
+        label.set_halign(gtk::Align::Start);
+        label.set_valign(gtk::Align::Center);
+
+        // Apply absolute positioning via CSS if needed.
+        if self.position_mode == PositionMode::Absolute {
+            let mut css = String::from("label {");
+            if let Some(x) = self.position.x {
+                css.push_str(&format!("margin-left: {}px;", x));
+            }
+            if let Some(y) = self.position.y {
+                css.push_str(&format!("margin-top: {}px;", y));
+            }
+            if let Some(w) = self.position.width {
+                css.push_str(&format!("min-width: {}px;", w));
+            }
+            if let Some(h) = self.position.height {
+                css.push_str(&format!("min-height: {}px;", h));
+            }
+            css.push('}');
+            crate::widget::apply_css(&label, &css);
+        }
+
+        label.upcast()
+    }
+
+    fn is_interactive(&self) -> bool {
+        false
+    }
+
+    fn padding(&self) -> Padding {
+        Padding::ZERO
+    }
+}
+
+impl Text {
+    fn color_hex(&self) -> String {
+        format!(
+            "#{:02x}{:02x}{:02x}",
+            (self.color.r * 255.0) as u8,
+            (self.color.g * 255.0) as u8,
+            (self.color.b * 255.0) as u8,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_builder() {
+        let t = Text::new("Hello")
+            .font_size(24.0)
+            .bold()
+            .color(Color::WHITE);
+        assert_eq!(t.content(), "Hello");
+        assert_eq!(t.font.size, 24.0);
+        assert_eq!(t.font.weight, FontWeight::Bold);
+    }
+
+    #[test]
+    fn text_absolute_position() {
+        let t = Text::new("Hi").at(50.0, 100.0).size(200.0, 30.0);
+        assert_eq!(t.position_mode(), PositionMode::Absolute);
+        assert_eq!(t.position.x, Some(50.0));
+        assert_eq!(t.position.y, Some(100.0));
+        assert_eq!(t.position.width, Some(200.0));
+        assert_eq!(t.position.height, Some(30.0));
+    }
+}
