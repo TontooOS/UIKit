@@ -48,7 +48,7 @@ impl TrafficLights {
         icon_path: &str,
         color: Color,
         on_click: impl Fn() + 'static,
-    ) -> GtkButton {
+    ) -> (GtkButton, Image) {
         let btn = GtkButton::new();
         btn.set_size_request(self.size as i32, self.size as i32);
 
@@ -90,25 +90,11 @@ impl TrafficLights {
         icon.set_visible(false);
         btn.set_child(Some(&icon));
 
-        let motion = gtk::EventControllerMotion::new();
-
-        let icon_show = icon.clone();
-        motion.connect_enter(move |_, _, _| {
-            icon_show.set_visible(true);
-        });
-
-        let icon_hide = icon.clone();
-        motion.connect_leave(move |_| {
-            icon_hide.set_visible(false);
-        });
-
-        btn.add_controller(motion);
-
         btn.connect_clicked(move |_| {
             on_click();
         });
 
-        btn
+        (btn, icon)
     }
 
     fn apply_focus_classes(buttons: &[GtkButton], active: bool) {
@@ -151,19 +137,39 @@ impl Widget for TrafficLights {
         let minimize_path = format!("{}/assets/minimize.png", manifest_dir);
         let maximize_path = format!("{}/assets/maximize.png", manifest_dir);
 
-        let close_btn = self.build_button(&close_path, Color::from_rgb(255, 95, 86), || {
+        let (close_btn, close_icon) = self.build_button(&close_path, Color::from_rgb(255, 95, 86), || {
             crate::app::dispatch_custom("__close");
         });
-        let minimize_btn = self.build_button(&minimize_path, Color::from_rgb(255, 189, 46), || {
+        let (minimize_btn, minimize_icon) = self.build_button(&minimize_path, Color::from_rgb(255, 189, 46), || {
             crate::app::dispatch_custom("__minimize");
         });
-        let maximize_btn = self.build_button(&maximize_path, Color::from_rgb(39, 201, 63), || {
+        let (maximize_btn, maximize_icon) = self.build_button(&maximize_path, Color::from_rgb(39, 201, 63), || {
             crate::app::dispatch_custom("__maximize");
         });
 
         container.append(&close_btn);
         container.append(&minimize_btn);
         container.append(&maximize_btn);
+
+        let icons = vec![close_icon, minimize_icon, maximize_icon];
+        let container_hover = container.clone();
+        let motion = gtk::EventControllerMotion::new();
+        {
+            let icons = icons.clone();
+            motion.connect_enter(move |_, _, _| {
+                for icon in &icons {
+                    icon.set_visible(true);
+                }
+            });
+        }
+        {
+            motion.connect_leave(move |_| {
+                for icon in &icons {
+                    icon.set_visible(false);
+                }
+            });
+        }
+        container_hover.add_controller(motion);
 
         // Invisible drag handle so the window can be moved from the button bar.
         let handle = gtk::WindowHandle::new();

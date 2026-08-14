@@ -12,7 +12,7 @@
 //! State lives in the `NoteState` delegate; the text field content is kept
 //! in a global buffer so it survives the view rebuild after each action.
 
-use tontoo_uikit::prelude::*;
+use uikit::prelude::*;
 use std::cell::RefCell;
 
 /// Holds the current draft text of the input field across view rebuilds.
@@ -36,7 +36,7 @@ fn app_view(notes: &[String]) -> VStack {
                     .on_change(|value| DRAFT.with(|d| *d.borrow_mut() = value))
                     .on_submit(|value| {
                         DRAFT.with(|d| *d.borrow_mut() = value);
-                        tontoo_uikit::app::dispatch_custom("notes_add");
+                        uikit::app::dispatch_custom("notes_add");
                     }),
             )
             .child(Button::new("Add").on_custom("notes_add")),

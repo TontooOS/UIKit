@@ -4,7 +4,7 @@
 //!
 //! Run with: `cargo run --example hello`
 
-use tontoo_uikit::prelude::*;
+use uikit::prelude::*;
 
 struct HelloDelegate {
     count: u32,

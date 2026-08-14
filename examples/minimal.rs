@@ -2,7 +2,7 @@
 //!
 //! Just a Text widget - to isolate if TrafficLights breaks the window.
 
-use tontoo_uikit::prelude::*;
+use uikit::prelude::*;
 
 fn main() {
     println!("TontooUIKit v{}.{}.{} (GTK4) MINIMAL", UITKIT_VERSION.0, UITKIT_VERSION.1, UITKIT_VERSION.2);

@@ -1,6 +1,20 @@
 //! TextField widget — single-line text input using GtkEntry.
+//!
+//! This is the UIKit equivalent of `UITextField` in Apple's UIKit.
+//!
+//! ```rust,no_run
+//! use uikit::prelude::*;
+//!
+//! let field = TextField::new("Search...")
+//!     .on_change(|text| println!("Changed: {}", text))
+//!     .on_submit(|text| println!("Submitted: {}", text));
+//!
+//! let view = View::new(field)
+//!     .with_frame(16.0, 16.0, 300.0, 44.0);
+//! ```
 
-use crate::style::{Color, Padding};
+use crate::style::{Padding, Rect, Size};
+use crate::view::{View, ViewContent};
 use crate::widget::{Position, PositionMode, Widget, WidgetId, next_widget_id};
 use gtk::prelude::*;
 use gtk::{self, Entry};
@@ -71,6 +85,78 @@ impl TextField {
 
     pub fn text_value(&self) -> &str {
         &self.text
+    }
+
+    /// Create a View wrapping this TextField.
+    pub fn to_view(self, x: f32, y: f32, width: f32, height: f32) -> View {
+        View::new(self).with_frame(x, y, width, height)
+    }
+}
+
+impl ViewContent for TextField {
+    fn render(&self, frame: Rect) -> gtk::Widget {
+        let entry = Entry::new();
+        entry.set_placeholder_text(Some(&self.placeholder));
+        if !self.text.is_empty() {
+            entry.set_text(&self.text);
+        }
+        entry.set_visibility(!self.password);
+
+        if frame.width > 0.0 {
+            entry.set_width_request(frame.width as i32);
+        }
+        if frame.height > 0.0 {
+            entry.set_height_request(frame.height as i32);
+        }
+
+        let css = format!(
+            "entry {{
+                background-color: #2a2a2c;
+                color: #ececec;
+                border-radius: 8px;
+                border: 1px solid #3a3a3d;
+                padding: 8px 12px;
+                font-family: 'SF Pro Display';
+                font-size: 13px;
+                caret-color: #0d8bff;
+            }}
+            entry:hover {{
+                border-color: #4a4a4e;
+            }}
+            entry:focus {{
+                border-color: #0d8bff;
+            }}",
+        );
+        crate::widget::apply_css(&entry, &css);
+
+        if let Some(handler) = &self.on_change {
+            let handler = handler.clone();
+            entry.connect_changed(move |e| {
+                let value = e.text().to_string();
+                handler(value);
+            });
+        }
+
+        if let Some(handler) = &self.on_submit {
+            let handler = handler.clone();
+            entry.connect_activate(move |e| {
+                let value = e.text().to_string();
+                handler(value);
+            });
+        }
+
+        entry.upcast()
+    }
+
+    fn can_become_first_responder(&self) -> bool {
+        true
+    }
+
+    fn size_that_fits(&self, available: Size) -> Size {
+        Size::new(
+            available.width.min(300.0),
+            44.0, // Standard text field height
+        )
     }
 }
 

@@ -20,8 +20,31 @@ impl Default for ColorScheme {
     fn default() -> Self { Self::Dark }
 }
 
+impl ColorScheme {
+    /// Detect the system color scheme from GTK4 settings.
+    ///
+    /// Checks the current theme name for "dark" suffix (e.g. "Adwaita-dark")
+    /// and the `gtk-application-prefer-dark-theme` setting.
+    pub fn detect_system() -> Self {
+        if let Some(settings) = gtk::Settings::default() {
+            // Check if dark theme is explicitly preferred
+            if settings.property::<bool>("gtk-application-prefer-dark-theme") {
+                return Self::Dark;
+            }
+
+            // Check theme name for dark variant
+            let theme = settings.property::<String>("gtk-theme-name");
+            let lower = theme.to_lowercase();
+            if lower.ends_with("-dark") || lower.contains("dark") {
+                return Self::Dark;
+            }
+        }
+        Self::Light
+    }
+}
+
 /// Application delegate trait — implement this for your app.
-pub trait AppDelegate: Send + 'static {
+pub trait AppDelegate {
     fn view(&self) -> Box<dyn Widget>;
     fn handle_custom(&mut self, _action: &str) {}
 }
@@ -66,10 +89,10 @@ pub fn dispatch_custom(action_name: &str) {
                 }
                 "__maximize" => {
                     if let Some(ref window) = app.window {
-                        if window.is_maximized() {
-                            window.unmaximize();
+                        if window.is_fullscreen() {
+                            window.unfullscreen();
                         } else {
-                            window.maximize();
+                            window.fullscreen();
                         }
                     }
                     return;
@@ -103,12 +126,63 @@ fn wrap_with_window_bar(view: Box<dyn Widget>) -> gtk::Widget {
     view_widget.set_hexpand(true);
     view_widget.set_vexpand(true);
 
-    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    vbox.set_hexpand(true);
-    vbox.set_vexpand(true);
-    vbox.append(&bar_widget);
-    vbox.append(&view_widget);
-    vbox.upcast()
+    let content_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content_box.set_hexpand(true);
+    content_box.set_vexpand(true);
+    content_box.append(&bar_widget);
+    content_box.append(&view_widget);
+
+    // Bottom resize grip for undecorated windows.
+    let grip = gtk::DrawingArea::new();
+    grip.set_hexpand(true);
+    grip.set_height_request(6);
+    grip.set_valign(gtk::Align::End);
+    grip.set_cursor_from_name(Some("ns-resize"));
+
+    let start_h = std::rc::Rc::new(std::cell::Cell::new(0i32));
+    let start_py = std::rc::Rc::new(std::cell::Cell::new(0.0f64));
+
+    let press = gtk::GestureClick::new();
+    press.set_button(1);
+    {
+        let sh = start_h.clone();
+        let sy = start_py.clone();
+        let cw = content_box.downgrade();
+        press.connect_pressed(move |_g, _n, _x, y| {
+            let Some(c) = cw.upgrade() else { return; };
+            let Some(root) = c.root() else { return; };
+            let Ok(win) = root.downcast::<gtk::Window>() else { return; };
+            let (_, h) = win.default_size();
+            sh.set(h);
+            sy.set(y);
+        });
+    }
+    grip.add_controller(press);
+
+    let motion = gtk::EventControllerMotion::new();
+    {
+        let sh = start_h.clone();
+        let sy = start_py.clone();
+        let cw = content_box.downgrade();
+        motion.connect_motion(move |_m, _x, y| {
+            let orig_h = sh.get();
+            if orig_h == 0 {
+                return;
+            }
+            let Some(c) = cw.upgrade() else { return; };
+            let Some(root) = c.root() else { return; };
+            let Ok(win) = root.downcast::<gtk::Window>() else { return; };
+            let dy = y - sy.get();
+            let new_h = (orig_h as f64 + dy).max(100.0) as i32;
+            let (w, _) = win.default_size();
+            win.set_default_size(w, new_h);
+        });
+    }
+    grip.add_controller(motion);
+
+    content_box.append(&grip);
+
+    content_box.upcast()
 }
 
 /// The top-level application container.
@@ -142,7 +216,7 @@ impl App {
         title: impl Into<String>,
         width: i32,
         height: i32,
-        delegate: impl AppDelegate,
+        delegate: impl AppDelegate + 'static,
     ) -> Self {
         let mut app = Self::new(title, width, height);
         app.delegate = Some(Box::new(delegate));
@@ -151,6 +225,21 @@ impl App {
 
     pub fn set_root(&mut self, widget: impl Widget + 'static) {
         self.root = Some(Box::new(widget));
+    }
+
+    /// Set the root view (new View-based API).
+    pub fn set_root_view(&mut self, view: crate::view::View) {
+        struct ViewWrapper(crate::view::View);
+        impl Widget for ViewWrapper {
+            fn id(&self) -> crate::widget::WidgetId { 0 }
+            fn to_gtk(&self) -> gtk::Widget { self.0.to_gtk() }
+        }
+        self.root = Some(Box::new(ViewWrapper(view)));
+    }
+
+    /// Set the application delegate (Apple UIKit style).
+    pub fn set_delegate(&mut self, delegate: impl AppDelegate + 'static) {
+        self.delegate = Some(Box::new(delegate));
     }
 
     pub fn set_title(&mut self, title: impl Into<String>) {
@@ -164,6 +253,11 @@ impl App {
 
     pub fn set_color_scheme(&mut self, scheme: ColorScheme) {
         self.color_scheme = scheme;
+    }
+
+    /// Auto-detect and set the color scheme from system settings.
+    pub fn auto_color_scheme(&mut self) {
+        self.color_scheme = ColorScheme::detect_system();
     }
 
     pub fn set_glass(&mut self, milkiness: f32, alpha: f32, sigma: f32) {
@@ -180,9 +274,9 @@ impl App {
     /// standard driver for [`Animator`](crate::animation::Animator) ticks:
     ///
     /// ```no_run
-    /// # use tontoo_uikit::prelude::*;
-    /// # use tontoo_uikit::animation::*;
-    /// # use tontoo_uikit::style::Size;
+    /// # use uikit::prelude::*;
+    /// # use uikit::animation::*;
+    /// # use uikit::style::Size;
     /// # let mut app = App::new("Animation", 800, 600);
     /// let mut animator = Animator::new();
     /// animator.set_bounds(Some(Rect::new(0.0, 0.0, 800.0, 600.0)));
@@ -198,8 +292,8 @@ impl App {
     pub fn color_scheme(&self) -> ColorScheme { self.color_scheme }
     pub fn glass(&self) -> Option<(f32, f32, f32)> { self.glass }
 
-    /// Fix WSLg rendering issues by linking Wayland sockets and setting
-    /// environment variables for software rendering.
+    /// Fix WSLg rendering issues by linking Wayland sockets and preferring
+    /// the OpenGL renderer (the cursor only renders via the Wayland path).
     fn fix_wslg_environment() {
         // Only on Linux/WSL
         #[cfg(target_os = "linux")]
@@ -229,12 +323,10 @@ impl App {
                 }
             }
 
-            // Force software rendering if GL/Vulkan fails.
+            // Prefer native Wayland. On WSLg the OpenGL renderer can freeze
+            // input handling, so use cairo (software) which is reliable.
             if std::env::var("GSK_RENDERER").is_err() {
                 std::env::set_var("GSK_RENDERER", "cairo");
-            }
-            if std::env::var("LIBGL_ALWAYS_SOFTWARE").is_err() {
-                std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
             }
         }
     }
@@ -256,6 +348,27 @@ impl App {
             }}
             button {{
                 font-family: 'SF Pro Display';
+            }}
+            scrollbar {{
+                background: transparent;
+                border: none;
+            }}
+            scrollbar slider {{
+                min-width: 6px;
+                min-height: 40px;
+                border-radius: 3px;
+                background: rgba(255, 255, 255, 0.2);
+                border: none;
+                margin: 2px;
+            }}
+            scrollbar slider:hover {{
+                background: rgba(255, 255, 255, 0.35);
+            }}
+            scrollbar slider:active {{
+                background: rgba(255, 255, 255, 0.5);
+            }}
+            scrolledwindow {{
+                background: transparent;
             }}",
             bg, fg, fg,
         );
@@ -289,22 +402,17 @@ impl App {
         let height = self.height;
         let css = self.build_css();
         let tick = self.tick.take();
-        let initial_view = if let Some(ref delegate) = self.delegate {
-            Some(delegate.view())
-        } else {
-            self.root.take()
-        };
-        let initial_view = std::cell::RefCell::new(initial_view);
+        let has_delegate = self.delegate.is_some();
+        let initial_root = std::cell::RefCell::new(self.root.take());
 
         // Store delegate in thread-local state for dispatch.
-        if let Some(delegate) = self.delegate.take() {
-            APP_STATE.with(|state| {
-                *state.borrow_mut() = Some(AppState {
-                    delegate,
-                    window: None,
-                });
+        let delegate = self.delegate.take().unwrap_or_else(|| Box::new(NoDelegate));
+        APP_STATE.with(|state| {
+            *state.borrow_mut() = Some(AppState {
+                delegate,
+                window: None,
             });
-        }
+        });
 
         // Drive the per-frame tick (defaults to 60 FPS while the app runs).
         if let Some(mut tick) = tick {
@@ -324,8 +432,17 @@ impl App {
                 gtk::STYLE_PROVIDER_PRIORITY_APPLICATION as u32,
             );
 
-            // Build widget tree FIRST, then window.
-            let gtk_widget = if let Some(view) = initial_view.borrow_mut().take() {
+            // Build widget tree AFTER GTK is initialized.
+            let initial_view = if has_delegate {
+                APP_STATE.with(|state| {
+                    let state = state.borrow();
+                    state.as_ref().map(|s| s.delegate.view())
+                })
+            } else {
+                initial_root.borrow_mut().take()
+            };
+
+            let gtk_widget = if let Some(view) = initial_view {
                 Some(wrap_with_window_bar(view))
             } else {
                 None
@@ -344,6 +461,9 @@ impl App {
             }
 
             let window = builder.build();
+
+            // Allow window resizing even when undecorated.
+            window.set_resizable(true);
 
             // Ensure the default cursor is visible (fixes invisible cursor on
             // WSLg / software rendering where the theme cursor may not show).

@@ -76,7 +76,7 @@ impl Position {
 /// The core trait that all widgets implement.
 ///
 /// Each widget produces a GTK4 widget via [`to_gtk()`](Widget::to_gtk).
-pub trait Widget: Send + Sync {
+pub trait Widget {
     fn id(&self) -> WidgetId;
 
     fn children(&self) -> Vec<&dyn Widget> {

@@ -205,6 +205,52 @@ impl Default for Point {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Rect
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Rect {
+    pub const ZERO: Self = Self { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self { x, y, width, height }
+    }
+
+    pub fn origin(&self) -> Point {
+        Point::new(self.x, self.y)
+    }
+
+    pub fn size(&self) -> Size {
+        Size::new(self.width, self.height)
+    }
+
+    pub fn contains(&self, point: Point) -> bool {
+        point.x >= self.x
+            && point.x <= self.x + self.width
+            && point.y >= self.y
+            && point.y <= self.y + self.height
+    }
+
+    pub fn intersects(&self, other: &Rect) -> bool {
+        self.x < other.x + other.width
+            && self.x + self.width > other.x
+            && self.y < other.y + other.height
+            && self.y + self.height > other.y
+    }
+}
+
+impl Default for Rect {
+    fn default() -> Self { Self::ZERO }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Alignment
 // ═══════════════════════════════════════════════════════════════
 

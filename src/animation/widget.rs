@@ -4,14 +4,14 @@
 //! widgets. [`AnimatedWidget`] maps a [`DynamicItem`] to a `gtk::Widget` and
 //! applies the item's position, scale and opacity to the widget every frame.
 //!
-//! Animated widgets live in a `gtk::Overlay` parent so they float above the
-//! rest of the layout. Drive them once per frame with
-//! [`AnimatedWidget::apply`]. For a fully wired example see
-//! ``examples/animation.rs``.
+//! ```text
+//! use uikit::animation::prelude::*;
+//! // example: examples/animation.rs
+//! ```
 
-use crate::animation::animator::{Animator, DynamicItem};
-use crate::animation::math::{Vec2};
-use crate::style::Size;
+use uikitdynamics::animator::{Animator, DynamicItem};
+use uikitdynamics::math::Vec2;
+use uikitdynamics::math::Size;
 use gtk::prelude::*;
 use gtk::{self, Button, Overlay as GtkOverlay, Widget as GtkWidget};
 
@@ -124,8 +124,8 @@ impl AnimatedWidget {
     }
 
     /// Rectangle covered by the item (centered on `position`).
-    pub fn bounds(&self, item: &DynamicItem) -> crate::animation::math::Rect {
-        crate::animation::math::Rect::new(
+    pub fn bounds(&self, item: &DynamicItem) -> uikitdynamics::math::Rect {
+        uikitdynamics::math::Rect::new(
             item.position.x - self.size.width / 2.0,
             item.position.y - self.size.height / 2.0,
             self.size.width,
