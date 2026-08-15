@@ -177,6 +177,9 @@ impl Widget for HStack {
             if child.flex_weight() > 0.0 {
                 gtk_child.set_hexpand(true);
                 gtk_child.set_halign(gtk::Align::Fill);
+            } else if child.expand_vertically() {
+                gtk_child.set_vexpand(true);
+                gtk_child.set_valign(gtk::Align::Fill);
             } else {
                 gtk_child.set_valign(valign);
             }
@@ -241,15 +244,13 @@ impl Widget for ZStack {
     fn to_gtk(&self) -> gtk::Widget {
         let overlay = gtk::Overlay::new();
 
-        for child in &self.children {
+        for (i, child) in self.children.iter().enumerate() {
             let gtk_child = child.to_gtk();
-            overlay.add_overlay(&gtk_child);
-        }
-
-        // Make first child the main widget for sizing.
-        if let Some(first) = self.children.first() {
-            let main = first.to_gtk();
-            overlay.set_child(Some(&main));
+            if i == 0 {
+                overlay.set_child(Some(&gtk_child));
+            } else {
+                overlay.add_overlay(&gtk_child);
+            }
         }
 
         overlay.upcast()

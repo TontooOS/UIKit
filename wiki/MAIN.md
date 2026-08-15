@@ -99,3 +99,11 @@ App (event loop, window, CSS)
 - [Shader.md](Shader.md) -- GPU shader system
 - [ViewController.md](ViewController.md) -- screen management
 - [Constraints.md](Constraints.md) -- layout system
+
+## Performance Notes
+
+TontooUIKit uses a shared `CssProvider` per display (via `apply_css`) to avoid
+leaking providers on every widget render call.  Animated widgets cache their
+scale-transform `CssProvider` instead of allocating one per frame.  The shader
+fullscreen quad (VAO/VBO) is created once and reused across frames.  `ZStack`
+renders the first child only once (as the main child, not as an overlay).

@@ -11,6 +11,8 @@ type Gl = glow::Context;
 type GlProgram = <glow::Context as HasContext>::Program;
 type GlShader = <glow::Context as HasContext>::Shader;
 type GlUniformLocation = <glow::Context as HasContext>::UniformLocation;
+type GlVertexArray = <glow::Context as HasContext>::VertexArray;
+type GlBuffer = <glow::Context as HasContext>::Buffer;
 
 // ═══════════════════════════════════════════════════════════════
 // Shader
@@ -399,6 +401,8 @@ void main() {
 // ═══════════════════════════════════════════════════════════════
 
 /// Render a fullscreen quad using the given shader.
+///
+/// The VAO and VBO are created once and reused across frames.
 pub fn render_fullscreen(gl: &Gl, shader: &Shader, uniforms: &Uniforms) {
     shader.use_program(gl);
     uniforms.apply(shader, gl);
@@ -409,25 +413,42 @@ pub fn render_fullscreen(gl: &Gl, shader: &Shader, uniforms: &Uniforms) {
         -1.0,  1.0,  1.0, -1.0,  1.0,  1.0,
     ];
 
-    unsafe {
-        let vao = gl.create_vertex_array().unwrap();
-        let vbo = gl.create_buffer().unwrap();
-
-        gl.bind_vertex_array(Some(vao));
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-        gl.buffer_data_u8_slice(
-            glow::ARRAY_BUFFER,
-            std::slice::from_raw_parts(vertices.as_ptr() as *const u8, vertices.len() * 4),
-            glow::STATIC_DRAW,
-        );
-
-        gl.enable_vertex_attrib_array(0);
-        gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 0, 0);
-        gl.draw_arrays(glow::TRIANGLES, 0, 6);
-
-        gl.delete_vertex_array(vao);
-        gl.delete_buffer(vbo);
+    thread_local! {
+        static QUAD_STATE: std::cell::Cell<Option<(GlVertexArray, GlBuffer)>> = const { std::cell::Cell::new(None) };
     }
+
+    QUAD_STATE.with(|cell| {
+        if let Some((vao, vbo)) = cell.get() {
+            unsafe {
+                gl.bind_vertex_array(Some(vao));
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+                gl.enable_vertex_attrib_array(0);
+                gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 0, 0);
+                gl.draw_arrays(glow::TRIANGLES, 0, 6);
+                gl.bind_vertex_array(None);
+            }
+        } else {
+            unsafe {
+                let new_vao = gl.create_vertex_array().unwrap();
+                let new_vbo = gl.create_buffer().unwrap();
+
+                gl.bind_vertex_array(Some(new_vao));
+                gl.bind_buffer(glow::ARRAY_BUFFER, Some(new_vbo));
+                gl.buffer_data_u8_slice(
+                    glow::ARRAY_BUFFER,
+                    std::slice::from_raw_parts(vertices.as_ptr() as *const u8, vertices.len() * 4),
+                    glow::STATIC_DRAW,
+                );
+
+                gl.enable_vertex_attrib_array(0);
+                gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 0, 0);
+                gl.draw_arrays(glow::TRIANGLES, 0, 6);
+                gl.bind_vertex_array(None);
+
+                cell.set(Some((new_vao, new_vbo)));
+            }
+        }
+    });
 }
 
 #[cfg(test)]

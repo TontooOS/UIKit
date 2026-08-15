@@ -12,9 +12,12 @@ categories = ["gui"]
 gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
 glib = "0.20"
 serde = { version = "1", features = ["derive"] }
-uikitdynamics = { path = "../UIKitDynamics" }
+uikitdynamics = { path = "/Library/System/uikitdynamics" }
 bitflags = "2"
 glow = "0.16"
 libloading = "0.8"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dev-dependencies]

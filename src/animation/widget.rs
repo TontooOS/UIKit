@@ -14,6 +14,7 @@ use uikitdynamics::math::Vec2;
 use uikitdynamics::math::Size;
 use gtk::prelude::*;
 use gtk::{self, Button, Overlay as GtkOverlay, Widget as GtkWidget};
+use std::cell::RefCell;
 
 // ═══════════════════════════════════════════════════════════════
 // AnimatedWidget
@@ -35,6 +36,8 @@ pub struct AnimatedWidget {
     pub widget: GtkWidget,
     /// Item size used to center the widget and drive collisions.
     pub size: Size,
+    /// Cached CssProvider for scale transforms (avoids per-frame allocation).
+    scale_provider: std::rc::Rc<RefCell<Option<gtk::CssProvider>>>,
 }
 
 impl AnimatedWidget {
@@ -49,6 +52,7 @@ impl AnimatedWidget {
             panel: panel.clone(),
             widget,
             size,
+            scale_provider: std::rc::Rc::new(RefCell::new(None)),
         }
     }
 
@@ -96,7 +100,7 @@ impl AnimatedWidget {
 
         let scale = item.scale;
         if (scale - 1.0).abs() > 0.001 {
-            apply_scale(&self.widget, scale);
+            apply_scale_cached(&self.widget, scale, &self.scale_provider);
         }
         self.widget.queue_draw();
     }
@@ -138,16 +142,21 @@ impl AnimatedWidget {
 // Scale helper
 // ═══════════════════════════════════════════════════════════════
 
-/// Apply a CSS scale transform to a widget. Scaling is idempotent per frame;
-/// GTK4 re-renders the widget at its scaled size on the next draw.
-fn apply_scale(widget: &GtkWidget, scale: f32) {
+/// Apply a CSS scale transform to a widget, reusing a cached CssProvider.
+fn apply_scale_cached(widget: &GtkWidget, scale: f32, cache: &std::rc::Rc<RefCell<Option<gtk::CssProvider>>>) {
     let css = format!(
         "* {{ transform: scale({scale}); transform-origin: center; }}"
     );
-    let provider = gtk::CssProvider::new();
-    provider.load_from_string(&css);
-    widget.style_context().add_provider(
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION as u32,
-    );
+    let mut borrow = cache.borrow_mut();
+    if let Some(ref provider) = *borrow {
+        provider.load_from_string(&css);
+    } else {
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&css);
+        widget.style_context().add_provider(
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION as u32,
+        );
+        *borrow = Some(provider);
+    }
 }

@@ -62,6 +62,7 @@ impl AppDelegate for NoDelegate {
 struct AppState {
     delegate: Box<dyn AppDelegate>,
     window: Option<gtk::ApplicationWindow>,
+    show_window_bar: bool,
 }
 
 thread_local! {
@@ -103,11 +104,20 @@ pub fn dispatch_custom(action_name: &str) {
             // Delegate custom actions
             app.delegate.handle_custom(action_name);
             let view = app.delegate.view();
-            let gtk_widget = wrap_with_window_bar(view);
+            let gtk_widget = if app.show_window_bar {
+                wrap_with_window_bar(view)
+            } else {
+                let w = view.to_gtk();
+                w.set_hexpand(true);
+                w.set_vexpand(true);
+                w.upcast()
+            };
             gtk_widget.set_hexpand(true);
             gtk_widget.set_vexpand(true);
             gtk_widget.set_visible(true);
             if let Some(ref window) = app.window {
+                // Drop old child first to avoid widget tree accumulation.
+                window.set_child(None::<&gtk::Widget>);
                 window.set_child(Some(&gtk_widget));
                 window.queue_draw();
             }
@@ -194,6 +204,7 @@ pub struct App {
     color_scheme: ColorScheme,
     glass: Option<(f32, f32, f32)>,
     delegate: Option<Box<dyn AppDelegate>>,
+    show_window_bar: bool,
     /// Optional per-frame callback (dt in seconds) driven by a 60 Hz timer.
     tick: Option<Box<dyn FnMut(f32) + Send>>,
 }
@@ -208,6 +219,7 @@ impl App {
             color_scheme: ColorScheme::Dark,
             glass: None,
             delegate: None,
+            show_window_bar: true,
             tick: None,
         }
     }
@@ -253,6 +265,12 @@ impl App {
 
     pub fn set_color_scheme(&mut self, scheme: ColorScheme) {
         self.color_scheme = scheme;
+    }
+
+    /// Disable the automatic window bar (traffic lights + drag area).
+    pub fn no_window_bar(&mut self) -> &mut Self {
+        self.show_window_bar = false;
+        self
     }
 
     /// Auto-detect and set the color scheme from system settings.
@@ -411,6 +429,7 @@ impl App {
             *state.borrow_mut() = Some(AppState {
                 delegate,
                 window: None,
+                show_window_bar: self.show_window_bar,
             });
         });
 
@@ -443,7 +462,15 @@ impl App {
             };
 
             let gtk_widget = if let Some(view) = initial_view {
-                Some(wrap_with_window_bar(view))
+                let state = APP_STATE.with(|s| s.borrow().as_ref().map(|s| s.show_window_bar).unwrap_or(true));
+                if state {
+                    Some(wrap_with_window_bar(view))
+                } else {
+                    let w = view.to_gtk();
+                    w.set_hexpand(true);
+                    w.set_vexpand(true);
+                    Some(w.upcast())
+                }
             } else {
                 None
             };

@@ -110,6 +110,14 @@ pub trait Widget {
         false
     }
 
+    /// Whether this widget should expand vertically to fill available height.
+    ///
+    /// `HStack` uses this to set `vexpand(true)` and `valign(Fill)` on the
+    /// child, instead of centering it.
+    fn expand_vertically(&self) -> bool {
+        false
+    }
+
     fn padding(&self) -> Padding {
         Padding::ZERO
     }
@@ -191,6 +199,9 @@ pub fn color_to_css(c: Color) -> String {
 }
 
 /// Apply CSS inline to a GTK4 widget.
+///
+/// Creates a display-level [`gtk::CssProvider`] so that class selectors
+/// targeting child widgets (e.g. `.sl-track`) work across the widget tree.
 pub fn apply_css(_widget: &impl IsA<gtk::Widget>, css: &str) {
     let display = gtk::gdk::Display::default().expect("Could not get default display");
     let css_provider = gtk::CssProvider::new();
