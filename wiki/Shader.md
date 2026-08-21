@@ -178,7 +178,8 @@ pub enum ShaderError {
 - Uses `glow` (OpenGL bindings) for shader compilation
 - Uses `libloading` + `glXGetProcAddress` from libGLX for GL function loading
 - GLArea creates an OpenGL ES 3.0 context (GTK4 default); all shaders use `#version 300 es`
-- Auto-animation via `glib::timeout_add_local` at 60 FPS
+- Auto-animation via a self-cancelling `glib::timeout_add_local` timer at 60 FPS
+  (weak reference to the `GLArea`; stops when the widget is destroyed)
 - Mouse tracking via `gtk::EventControllerMotion`
 
 ## Cross References

@@ -26,6 +26,39 @@ windowed mode using `window.fullscreen()` / `window.unfullscreen()` (the
 `__maximize` action in `dispatch_custom`). The red button closes the window
 (`__close`), the yellow button minimizes it (`__minimize`).
 
+## Window Resizing
+
+Undecorated windows get no resize borders from the compositor, so `App::run`
+wraps the window content in a `gtk::Overlay` with eight invisible resize
+handles: one strip on each edge (`North`, `South`, `West`, `East`, 6 px) and
+one square on each corner (`NorthWest`, `NorthEast`, `SouthWest`,
+`SouthEast`, 14 px). Corners are added last so they sit on top of the edge
+strips.
+
+Each handle shows the matching resize cursor (`n-resize`, `se-resize`, ...).
+A press hands the interactive resize to the compositor via
+`gdk_toplevel_begin_resize`, which gives smooth, compositor-driven resizing on
+Wayland and X11 (including WSLg and TontooCompositor). If the window surface is
+not a `GdkToplevel`, the handle falls back to a manual drag that resizes the
+window with `set_default_size` (minimum 320x240). The handles are re-applied by
+`dispatch_custom` after every delegate rebuild, so resizing survives state
+updates.
+
+## Auto-scroll, screen fit and split layout
+
+`App::run` wraps the view so content scrolls instead of growing the window. If
+the root is an `HStack` with exactly two children, it is treated as a window
+layout: the left child becomes a fixed sidebar that fills the full window
+height (only its own internal content may scroll), and the right child becomes
+the scrollable content area. Any other root is wrapped in a single scroll
+container. With the window bar enabled, only the content scrolls; the
+traffic-light bar stays fixed. The window defaults to the content's natural
+size capped at half the monitor size in both directions (the content is
+measured before wrapping, the monitor size is divided by its scale factor so
+the cap is half the visible screen). Delegate rebuilds via `dispatch_custom`
+re-apply the same layout and the resize handles, so scroll protection and
+resizing never disappear after an interaction.
+
 ## Quick Start
 
 ```rust
@@ -102,8 +135,22 @@ App (event loop, window, CSS)
 
 ## Performance Notes
 
-TontooUIKit uses a shared `CssProvider` per display (via `apply_css`) to avoid
-leaking providers on every widget render call.  Animated widgets cache their
-scale-transform `CssProvider` instead of allocating one per frame.  The shader
-fullscreen quad (VAO/VBO) is created once and reused across frames.  `ZStack`
-renders the first child only once (as the main child, not as an overlay).
+TontooUIKit is designed so long-running apps do not accumulate work or memory
+over time:
+
+- `apply_css` attaches a `CssProvider` to the widget's own style context. The
+  provider cascades to the widget's descendants and is released together with
+  the widget when it is destroyed. Providers are never registered on the
+  display, which would keep them alive for the whole process and slow CSS
+  matching down the longer the app runs.
+- Animated widgets cache their scale-transform `CssProvider` and skip frames
+  where position, opacity and scale did not change, so the always-running
+  60 Hz tick does not force a full repaint of idle widgets.
+- `ShaderView` drives auto-animation with a self-cancelling timer that only
+  holds a weak reference to the `GLArea`. The timer stops itself once the
+  widget is destroyed instead of piling up 60 FPS redraw sources.
+- `TrafficLights` connects the window `is-active` watcher exactly once per
+  instance, so repeated minimize/restore cycles do not stack signal handlers.
+- The shader fullscreen quad (VAO/VBO) is created once and reused across
+  frames. `ZStack` renders the first child only once (as the main child, not
+  as an overlay).

@@ -200,14 +200,19 @@ pub fn color_to_css(c: Color) -> String {
 
 /// Apply CSS inline to a GTK4 widget.
 ///
-/// Creates a display-level [`gtk::CssProvider`] so that class selectors
-/// targeting child widgets (e.g. `.sl-track`) work across the widget tree.
-pub fn apply_css(_widget: &impl IsA<gtk::Widget>, css: &str) {
-    let display = gtk::gdk::Display::default().expect("Could not get default display");
+/// The provider is attached to the widget's own style context and cascades
+/// to the widget's descendants (so class selectors targeting child widgets
+/// such as `.sl-track` still work). Because the provider is scoped to the
+/// widget it is released together with the widget when it is destroyed.
+///
+/// This intentionally does NOT register the provider on the display: doing so
+/// would add a permanently retained, never-removable provider for every call,
+/// which accumulates for the lifetime of the process and slows CSS matching
+/// down as the app runs longer.
+pub fn apply_css(widget: &impl IsA<gtk::Widget>, css: &str) {
     let css_provider = gtk::CssProvider::new();
     css_provider.load_from_string(css);
-    gtk::style_context_add_provider_for_display(
-        &display,
+    widget.style_context().add_provider(
         &css_provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION as u32,
     );

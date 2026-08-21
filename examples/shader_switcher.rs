@@ -148,9 +148,12 @@ impl AppDelegate for ShaderSwitcherApp {
         });
 
         {
-            let gl_ref = gl_area.clone();
+            let gl_area_weak = gl_area.downgrade();
             glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
-                gl_ref.queue_draw();
+                let Some(area) = gl_area_weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                area.queue_draw();
                 glib::ControlFlow::Continue
             });
         }

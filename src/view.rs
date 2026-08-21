@@ -264,6 +264,11 @@ impl View {
         self.tag = tag;
     }
 
+    pub fn with_tag(mut self, tag: i32) -> Self {
+        self.tag = tag;
+        self
+    }
+
     // ─── View Hierarchy ────────────────────────────────────
 
     pub fn superview(&self) -> Option<ViewId> {

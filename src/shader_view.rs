@@ -154,9 +154,17 @@ impl ViewContent for ShaderView {
         });
 
         if auto_animate {
-            let gl_area_ref = gl_area.clone();
+            // Drive redraws with a self-cancelling timer: it only holds a weak
+            // reference to the GLArea and stops itself once the widget is
+            // destroyed. A permanent timer with a strong reference would keep
+            // the widget tree alive and pile up 60 FPS redraw sources every
+            // time a ShaderView is created.
+            let gl_area_weak = gl_area.downgrade();
             glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
-                gl_area_ref.queue_draw();
+                let Some(area) = gl_area_weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                area.queue_draw();
                 glib::ControlFlow::Continue
             });
         }

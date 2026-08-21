@@ -38,6 +38,10 @@ pub struct AnimatedWidget {
     pub size: Size,
     /// Cached CssProvider for scale transforms (avoids per-frame allocation).
     scale_provider: std::rc::Rc<RefCell<Option<gtk::CssProvider>>>,
+    /// Last applied (x, y, opacity, scale). When nothing changed we skip the
+    /// redraw so an always-running 60 FPS tick does not force a full repaint
+    /// of idle widgets every frame.
+    last_applied: std::rc::Rc<RefCell<Option<(f32, f32, f32, f32)>>>,
 }
 
 impl AnimatedWidget {
@@ -53,6 +57,7 @@ impl AnimatedWidget {
             widget,
             size,
             scale_provider: std::rc::Rc::new(RefCell::new(None)),
+            last_applied: std::rc::Rc::new(RefCell::new(None)),
         }
     }
 
@@ -93,12 +98,33 @@ impl AnimatedWidget {
     pub fn apply(&self, item: &DynamicItem) {
         let x = item.position.x - self.size.width / 2.0;
         let y = item.position.y - self.size.height / 2.0;
+        let opacity = item.opacity.clamp(0.0, 1.0);
+        let scale = item.scale;
+
+        // Skip frames where nothing changed so idle widgets are not repainted
+        // at the full tick rate.
+        {
+            let mut last = self.last_applied.borrow_mut();
+            let changed = match *last {
+                Some((lx, ly, lo, ls)) => {
+                    (lx - x).abs() > 0.01
+                        || (ly - y).abs() > 0.01
+                        || (lo - opacity).abs() > 0.001
+                        || (ls - scale).abs() > 0.001
+                }
+                None => true,
+            };
+            if !changed {
+                return;
+            }
+            *last = Some((x, y, opacity, scale));
+        }
+
         self.widget.set_margin_start(x.max(0.0) as i32);
         self.widget.set_margin_top(y.max(0.0) as i32);
 
-        self.widget.set_opacity(item.opacity.clamp(0.0, 1.0) as f64);
+        self.widget.set_opacity(opacity as f64);
 
-        let scale = item.scale;
         if (scale - 1.0).abs() > 0.001 {
             apply_scale_cached(&self.widget, scale, &self.scale_provider);
         }

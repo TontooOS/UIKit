@@ -192,7 +192,16 @@ impl Widget for TrafficLights {
 
         let buttons = vec![close_btn, minimize_btn, maximize_btn];
         let container_weak = container.downgrade();
+        // Connect the is-active watcher only once: `connect_map` fires on every
+        // window map, so connecting inside it would accumulate an ever-growing
+        // number of signal handlers across minimize/restore cycles.
+        let connected = std::rc::Rc::new(std::cell::Cell::new(false));
         handle.connect_map(move |_| {
+            if connected.get() {
+                return;
+            }
+            connected.set(true);
+
             let Some(container) = container_weak.upgrade() else {
                 return;
             };

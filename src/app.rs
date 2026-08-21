@@ -4,6 +4,7 @@
 //! Delegate-driven state updates with automatic view rebuilding.
 
 use crate::widget::Widget;
+use glib::object::Cast;
 use gtk::prelude::*;
 use gtk::{self, Application, ApplicationWindow};
 use std::cell::RefCell;
@@ -104,14 +105,8 @@ pub fn dispatch_custom(action_name: &str) {
             // Delegate custom actions
             app.delegate.handle_custom(action_name);
             let view = app.delegate.view();
-            let gtk_widget = if app.show_window_bar {
-                wrap_with_window_bar(view)
-            } else {
-                let w = view.to_gtk();
-                w.set_hexpand(true);
-                w.set_vexpand(true);
-                w.upcast()
-            };
+            let (content, _) = build_window_content(view, app.show_window_bar);
+            let gtk_widget = wrap_window_with_resize_edges(content);
             gtk_widget.set_hexpand(true);
             gtk_widget.set_vexpand(true);
             gtk_widget.set_visible(true);
@@ -125,74 +120,282 @@ pub fn dispatch_custom(action_name: &str) {
     });
 }
 
-/// Wrap an app view with the standard UIKIT window chrome:
-/// a full-width drag bar with the macOS-style traffic lights on top.
-fn wrap_with_window_bar(view: Box<dyn Widget>) -> gtk::Widget {
-    let bar = crate::widgets::TrafficLights::new();
-    let bar_widget = bar.to_gtk();
-    bar_widget.set_hexpand(true);
-
+/// Build the window content column: an optional traffic-light bar on top
+/// (fixed) and the view below. Returns the column widget and the view's
+/// natural size (used to size the window before it is shown).
+fn build_window_content(view: Box<dyn Widget>, show_bar: bool) -> (gtk::Widget, (i32, i32)) {
     let view_widget = view.to_gtk();
     view_widget.set_hexpand(true);
     view_widget.set_vexpand(true);
+    let (_, nat_w, _, _) = view_widget.measure(gtk::Orientation::Horizontal, -1);
+    let (_, nat_h, _, _) = view_widget.measure(gtk::Orientation::Vertical, -1);
 
-    let content_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    content_box.set_hexpand(true);
-    content_box.set_vexpand(true);
-    content_box.append(&bar_widget);
-    content_box.append(&view_widget);
+    // Split layout: an HStack root with exactly two children is treated as a
+    // fixed sidebar (left) plus scrollable content (right). Only the content
+    // scrolls; the sidebar stays fixed and fills the full window height.
+    let root_layout = if let Some(b) = view_widget.downcast_ref::<gtk::Box>() {
+        if b.orientation() == gtk::Orientation::Horizontal {
+            let mut children = Vec::new();
+            let mut c = b.first_child();
+            while let Some(child) = c {
+                children.push(child.clone());
+                c = child.next_sibling();
+            }
+            if children.len() == 2 {
+                let side = children[0].clone();
+                let content = children[1].clone();
+                b.remove(&side);
+                b.remove(&content);
 
-    // Bottom resize grip for undecorated windows.
-    let grip = gtk::DrawingArea::new();
-    grip.set_hexpand(true);
-    grip.set_height_request(6);
-    grip.set_valign(gtk::Align::End);
-    grip.set_cursor_from_name(Some("ns-resize"));
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                row.set_hexpand(true);
+                row.set_vexpand(true);
 
-    let start_h = std::rc::Rc::new(std::cell::Cell::new(0i32));
-    let start_py = std::rc::Rc::new(std::cell::Cell::new(0.0f64));
+                side.set_hexpand(false);
+                side.set_vexpand(true);
+                side.set_valign(gtk::Align::Fill);
+                row.append(&side);
 
-    let press = gtk::GestureClick::new();
-    press.set_button(1);
+                let scrolled = wrap_scrollable(content);
+                scrolled.set_hexpand(true);
+                scrolled.set_vexpand(true);
+                row.append(&scrolled);
+
+                row.upcast()
+            } else {
+                wrap_scrollable(view_widget)
+            }
+        } else {
+            wrap_scrollable(view_widget)
+        }
+    } else {
+        wrap_scrollable(view_widget)
+    };
+
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    column.set_hexpand(true);
+    column.set_vexpand(true);
+    if show_bar {
+        let bar = crate::widgets::TrafficLights::new().to_gtk();
+        bar.set_hexpand(true);
+        column.append(&bar);
+    }
+    column.append(&root_layout);
+    (column.upcast(), (nat_w, nat_h))
+}
+
+/// Wrap content in a scroll container so oversized content gets scrollbars
+/// automatically instead of forcing the window to grow.
+fn wrap_scrollable(content: gtk::Widget) -> gtk::Widget {
+    let scrolled = gtk::ScrolledWindow::new();
+    scrolled.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scrolled.set_child(Some(&content));
+    scrolled.set_hexpand(true);
+    scrolled.set_vexpand(true);
+    scrolled.upcast()
+}
+
+/// Thickness of the invisible edge-resize strips in pixels.
+const RESIZE_EDGE_PX: i32 = 6;
+/// Size of the corner-resize squares in pixels.
+const RESIZE_CORNER_PX: i32 = 14;
+
+/// Window edges and corners that can be grabbed to resize an undecorated
+/// window (the compositor provides no resize borders for them).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResizeEdge {
+    North,
+    South,
+    West,
+    East,
+    NorthWest,
+    NorthEast,
+    SouthWest,
+    SouthEast,
+}
+
+impl ResizeEdge {
+    fn cursor(self) -> &'static str {
+        match self {
+            Self::North => "n-resize",
+            Self::South => "s-resize",
+            Self::West => "w-resize",
+            Self::East => "e-resize",
+            Self::NorthWest => "nw-resize",
+            Self::NorthEast => "ne-resize",
+            Self::SouthWest => "sw-resize",
+            Self::SouthEast => "se-resize",
+        }
+    }
+
+    fn gdk_edge(self) -> gtk::gdk::SurfaceEdge {
+        match self {
+            Self::North => gtk::gdk::SurfaceEdge::North,
+            Self::South => gtk::gdk::SurfaceEdge::South,
+            Self::West => gtk::gdk::SurfaceEdge::West,
+            Self::East => gtk::gdk::SurfaceEdge::East,
+            Self::NorthWest => gtk::gdk::SurfaceEdge::NorthWest,
+            Self::NorthEast => gtk::gdk::SurfaceEdge::NorthEast,
+            Self::SouthWest => gtk::gdk::SurfaceEdge::SouthWest,
+            Self::SouthEast => gtk::gdk::SurfaceEdge::SouthEast,
+        }
+    }
+
+    fn apply_layout(self, area: &gtk::DrawingArea) {
+        match self {
+            Self::North | Self::South => {
+                area.set_halign(gtk::Align::Fill);
+                area.set_hexpand(true);
+                area.set_height_request(RESIZE_EDGE_PX);
+                if self == Self::North {
+                    area.set_valign(gtk::Align::Start);
+                } else {
+                    area.set_valign(gtk::Align::End);
+                }
+            }
+            Self::West | Self::East => {
+                area.set_valign(gtk::Align::Fill);
+                area.set_vexpand(true);
+                area.set_width_request(RESIZE_EDGE_PX);
+                if self == Self::West {
+                    area.set_halign(gtk::Align::Start);
+                } else {
+                    area.set_halign(gtk::Align::End);
+                }
+            }
+            _ => {
+                area.set_size_request(RESIZE_CORNER_PX, RESIZE_CORNER_PX);
+                area.set_halign(if matches!(self, Self::NorthWest | Self::SouthWest) {
+                    gtk::Align::Start
+                } else {
+                    gtk::Align::End
+                });
+                area.set_valign(if matches!(self, Self::NorthWest | Self::NorthEast) {
+                    gtk::Align::Start
+                } else {
+                    gtk::Align::End
+                });
+            }
+        }
+    }
+}
+
+/// Wrap the window content in an overlay with invisible resize handles on all
+/// four edges and corners, so undecorated windows stay fully resizable.
+fn wrap_window_with_resize_edges(content: gtk::Widget) -> gtk::Widget {
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&content));
+    overlay.set_hexpand(true);
+    overlay.set_vexpand(true);
+
+    for edge in [
+        ResizeEdge::North,
+        ResizeEdge::South,
+        ResizeEdge::West,
+        ResizeEdge::East,
+    ] {
+        overlay.add_overlay(&resize_handle(edge));
+    }
+    // Corners last so they sit on top of the edge strips.
+    for corner in [
+        ResizeEdge::NorthWest,
+        ResizeEdge::NorthEast,
+        ResizeEdge::SouthWest,
+        ResizeEdge::SouthEast,
+    ] {
+        overlay.add_overlay(&resize_handle(corner));
+    }
+
+    overlay.upcast()
+}
+
+/// An invisible strip along one window edge. On press the interactive resize
+/// is handed to the compositor via `gdk_toplevel_begin_resize` (smooth on
+/// Wayland/X11). The same gesture drives a manual `set_default_size` fallback
+/// that takes over whenever the compositor handoff has no effect. GestureDrag
+/// keeps tracking even when the pointer leaves the strip.
+fn resize_handle(edge: ResizeEdge) -> gtk::Widget {
+    let area = gtk::DrawingArea::new();
+    edge.apply_layout(&area);
+    area.set_cursor_from_name(Some(edge.cursor()));
+    area.set_can_focus(false);
+
+    let start_size = std::rc::Rc::new(std::cell::Cell::new((0i32, 0i32)));
+
+    let drag = gtk::GestureDrag::new();
+    drag.set_button(1);
+
+    // Drag begin: remember the window size and try the compositor-driven
+    // resize first.
     {
-        let sh = start_h.clone();
-        let sy = start_py.clone();
-        let cw = content_box.downgrade();
-        press.connect_pressed(move |_g, _n, _x, y| {
-            let Some(c) = cw.upgrade() else { return; };
-            let Some(root) = c.root() else { return; };
-            let Ok(win) = root.downcast::<gtk::Window>() else { return; };
-            let (_, h) = win.default_size();
-            sh.set(h);
-            sy.set(y);
+        let ss = start_size.clone();
+        let area_wk = area.downgrade();
+        drag.connect_drag_begin(move |gesture, gx, gy| {
+            let Some(a) = area_wk.upgrade() else { return };
+            let Some(win) = a.root().and_then(|r| r.downcast::<gtk::Window>().ok()) else { return };
+            ss.set((win.width(), win.height()));
+
+            let event = gesture.current_event();
+            let device = event
+                .as_ref()
+                .and_then(|e| e.device())
+                .or_else(|| win.display().default_seat().and_then(|s| s.pointer()));
+            let time = event.as_ref().map(|e| e.time()).unwrap_or(0);
+            let Some(surface) = win.surface() else { return };
+            let Some(toplevel) = surface.dynamic_cast_ref::<gtk::gdk::Toplevel>() else { return };
+
+            // gdk_toplevel_begin_resize expects root (screen) coordinates on
+            // X11 (_NET_WM_MOVERESIZE); passing widget-local ones makes it a
+            // silent no-op, so translate them via the pointer position.
+            let (rx, ry) = match device.as_ref() {
+                Some(d) => surface
+                    .device_position(d)
+                    .map(|(x, y, _)| (x, y))
+                    .unwrap_or((gx, gy)),
+                None => (gx, gy),
+            };
+            match device.as_ref() {
+                Some(d) => toplevel.begin_resize(edge.gdk_edge(), Some(d), 1, rx, ry, time),
+                None => {
+                    toplevel.begin_resize(edge.gdk_edge(), None::<&gtk::gdk::Device>, 1, rx, ry, time)
+                }
+            }
         });
     }
-    grip.add_controller(press);
 
-    let motion = gtk::EventControllerMotion::new();
+    // Drag update: manual fallback. If the compositor accepted the handoff it
+    // owns the pointer grab, so no further events reach this gesture and this
+    // stays dormant.
     {
-        let sh = start_h.clone();
-        let sy = start_py.clone();
-        let cw = content_box.downgrade();
-        motion.connect_motion(move |_m, _x, y| {
-            let orig_h = sh.get();
-            if orig_h == 0 {
+        let ss = start_size.clone();
+        let area_wk = area.downgrade();
+        drag.connect_drag_update(move |_, dx, dy| {
+            let Some(a) = area_wk.upgrade() else { return };
+            let Some(win) = a.root().and_then(|r| r.downcast::<gtk::Window>().ok()) else { return };
+            let (ow, oh) = ss.get();
+            if ow == 0 && oh == 0 {
                 return;
             }
-            let Some(c) = cw.upgrade() else { return; };
-            let Some(root) = c.root() else { return; };
-            let Ok(win) = root.downcast::<gtk::Window>() else { return; };
-            let dy = y - sy.get();
-            let new_h = (orig_h as f64 + dy).max(100.0) as i32;
-            let (w, _) = win.default_size();
-            win.set_default_size(w, new_h);
+            let dx = dx.round() as i32;
+            let dy = dy.round() as i32;
+            let mut nw = ow;
+            let mut nh = oh;
+            match edge {
+                ResizeEdge::East | ResizeEdge::NorthEast | ResizeEdge::SouthEast => nw = ow + dx,
+                ResizeEdge::West | ResizeEdge::NorthWest | ResizeEdge::SouthWest => nw = ow - dx,
+                _ => {}
+            }
+            match edge {
+                ResizeEdge::South | ResizeEdge::SouthEast | ResizeEdge::SouthWest => nh = oh + dy,
+                ResizeEdge::North | ResizeEdge::NorthEast | ResizeEdge::NorthWest => nh = oh - dy,
+                _ => {}
+            }
+            win.set_default_size(nw.max(320), nh.max(240));
         });
     }
-    grip.add_controller(motion);
 
-    content_box.append(&grip);
-
-    content_box.upcast()
+    area.add_controller(drag);
+    area.upcast()
 }
 
 /// The top-level application container.
@@ -461,19 +664,18 @@ impl App {
                 initial_root.borrow_mut().take()
             };
 
-            let gtk_widget = if let Some(view) = initial_view {
+            let mut content_nat: (i32, i32) = (0, 0);
+            let gtk_widget: Option<gtk::Widget> = initial_view.map(|view| {
                 let state = APP_STATE.with(|s| s.borrow().as_ref().map(|s| s.show_window_bar).unwrap_or(true));
-                if state {
-                    Some(wrap_with_window_bar(view))
-                } else {
-                    let w = view.to_gtk();
-                    w.set_hexpand(true);
-                    w.set_vexpand(true);
-                    Some(w.upcast())
-                }
-            } else {
-                None
-            };
+                let (content, nat) = build_window_content(view, state);
+                content_nat = nat;
+                // Add invisible edge/corner resize handles around the content.
+                wrap_window_with_resize_edges(content)
+            });
+
+            // The view is already wrapped in its own scroll container inside
+            // build_window_content, so the window child is ready to use.
+            let child: Option<gtk::Widget> = gtk_widget;
 
             // Build window with child in builder.
             let mut builder = ApplicationWindow::builder()
@@ -483,7 +685,7 @@ impl App {
                 .default_height(height)
                 .decorated(false);
 
-            if let Some(ref child) = gtk_widget {
+            if let Some(ref child) = child {
                 builder = builder.child(child);
             }
 
@@ -491,6 +693,37 @@ impl App {
 
             // Allow window resizing even when undecorated.
             window.set_resizable(true);
+
+// Default the window to the content's natural size, capped at half the
+            // monitor size in both directions. The window therefore never
+            // grows to show everything when the content is huge — oversized
+            // content scrolls instead. The app can still resize afterwards.
+            let display = gtk::prelude::WidgetExt::display(&window);
+            let monitor = display
+                .monitors()
+                .item(0)
+                .and_then(|o| o.downcast::<gtk::gdk::Monitor>().ok())
+                .or_else(|| {
+                    window
+                        .surface()
+                        .and_then(|s| display.monitor_at_surface(&s))
+                });
+            if let Some(monitor) = monitor {
+                // Divide by the monitor scale factor first: WSLg / HiDPI
+                // reports the virtual resolution (e.g. 2560x1440) while the
+                // visible area is half that, so the cap must use the scaled
+                // (visible) size to actually be half the on-screen space.
+                let g = monitor.geometry();
+                let scale = monitor.scale_factor().max(1);
+                let vis_w = g.width() / scale;
+                let vis_h = g.height() / scale;
+                let cap_w = (vis_w / 2).max(320);
+                let cap_h = (vis_h / 2).max(240);
+                let (nat_w, nat_h) = content_nat;
+                let dw = if nat_w > 0 { nat_w.min(cap_w) } else { width.min(cap_w) };
+                let dh = if nat_h > 0 { nat_h.min(cap_h) } else { height.min(cap_h) };
+                window.set_default_size(dw.max(320), dh.max(240));
+            }
 
             // Ensure the default cursor is visible (fixes invisible cursor on
             // WSLg / software rendering where the theme cursor may not show).
