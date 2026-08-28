@@ -127,7 +127,6 @@ impl ViewContent for Label {
         let label = GtkLabel::new(Some(&self.content));
 
         let font_desc = format!("{} {} {}", self.font.family, self.font.size, self.weight_to_pango());
-        label.set_use_markup(true);
         label.set_markup(&format!(
             "<span font_desc=\"{}\" foreground=\"{}\">{}</span>",
             font_desc,
@@ -181,7 +180,6 @@ impl Widget for Label {
         let label = GtkLabel::new(Some(&self.content));
 
         let font_desc = format!("{} {} {}", self.font.family, self.font.size, self.weight_to_pango());
-        label.set_use_markup(true);
         label.set_markup(&format!(
             "<span font_desc=\"{}\" foreground=\"{}\">{}</span>",
             font_desc,

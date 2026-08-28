@@ -36,13 +36,25 @@ one square on each corner (`NorthWest`, `NorthEast`, `SouthWest`,
 strips.
 
 Each handle shows the matching resize cursor (`n-resize`, `se-resize`, ...).
-A press hands the interactive resize to the compositor via
-`gdk_toplevel_begin_resize`, which gives smooth, compositor-driven resizing on
-Wayland and X11 (including WSLg and TontooCompositor). If the window surface is
-not a `GdkToplevel`, the handle falls back to a manual drag that resizes the
-window with `set_default_size` (minimum 320x240). The handles are re-applied by
-`dispatch_custom` after every delegate rebuild, so resizing survives state
-updates.
+A press starts a `gtk::GestureDrag` whose behavior depends on the display
+backend:
+
+- **Native Wayland**: `gdk_toplevel_begin_resize` is called synchronously in
+  the press handler with surface-local press coordinates and the press device
+  (so GDK passes the matching implicit-grab serial). The compositor then runs
+  the whole resize with correct edge anchoring on all sides. This is the path
+  TontooCompositor serves.
+- **X11 / XWayland (WSLg)**: the same handoff is sent as a probe, because
+  WSLg's Weston silently drops `_NET_WM_MOVERESIZE` in many cases (known
+  WSLg issues 754/1008/1432). If drag updates keep arriving after 150 ms, the
+  handoff was dropped and the gesture resizes manually via
+  `set_default_size`; west/north edges additionally move the window through
+  X11 (`x11rb`, position-only configure) so the grabbed edge follows the
+  pointer where the environment allows repositioning.
+
+The handles are re-applied by `dispatch_custom` after every delegate rebuild,
+so resizing survives state updates. Set `UIKIT_RESIZE_DEBUG=1` to paint the
+handles in debug colors and log their allocations.
 
 ## Auto-scroll, screen fit and split layout
 
