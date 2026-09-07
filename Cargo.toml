@@ -2,7 +2,7 @@
 name = "uikit"
 version = "26.1.0"
 edition = "2021"
-license = "MIT"
+license = "TCL"
 description = "native Rust UI toolkit for TontooOS with a UIKit-Dynamics-style animation engine"
 readme = "README.md"
 keywords = ["tontoo", "ui", "gtk4", "compositor", "animation"]

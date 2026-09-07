@@ -65,6 +65,7 @@ pub mod app;
 pub mod animation;
 pub mod shader;
 pub mod shader_view;
+pub mod view_modifiers;
 
 /// Re-export of the CSS helper for applying inline styles.
 pub use widget::apply_css;
@@ -106,6 +107,9 @@ pub mod prelude {
     pub use crate::shader_view::{
         ShaderView, gradient_view, blur_view, glass_view, noise_view, rainbow_view, wave_view,
     };
+
+    // View modifiers (core backing for TontooUI/views)
+    pub use crate::view_modifiers::{ViewModifierExt, ViewModifiers, ControlSize, SwipeEdge, SwipeAction, ContainerBackground, get_modifiers};
 
     // Version
     pub use crate::UITKIT_VERSION;
