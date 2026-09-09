@@ -280,6 +280,84 @@ impl Alignment {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Corner radius tokens (match MacTahoe GTK theme $wm_radius)
+// ═══════════════════════════════════════════════════════════════
+
+/// Window corner radius in desktop mode (`laptop == 'false'` in GTK theme): 26px.
+pub const WINDOW_CORNER_RADIUS_DESKTOP: f32 = 26.0;
+/// Window corner radius in laptop mode: 24px.
+pub const WINDOW_CORNER_RADIUS_LAPTOP: f32 = 24.0;
+
+/// Device form factor that selects the window corner radius.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FormFactor {
+    Desktop,
+    Laptop,
+}
+
+impl Default for FormFactor {
+    fn default() -> Self { Self::Desktop }
+}
+
+impl FormFactor {
+    /// Window corner radius for this form factor (26px desktop / 24px laptop).
+    pub const fn window_corner_radius(self) -> f32 {
+        match self {
+            Self::Desktop => WINDOW_CORNER_RADIUS_DESKTOP,
+            Self::Laptop => WINDOW_CORNER_RADIUS_LAPTOP,
+        }
+    }
+
+    pub const fn is_laptop(self) -> bool {
+        matches!(self, Self::Laptop)
+    }
+}
+
+/// Window corner radius for a laptop flag (false = desktop 26px, true = laptop 24px).
+pub const fn window_corner_radius_for(laptop: bool) -> f32 {
+    if laptop {
+        WINDOW_CORNER_RADIUS_LAPTOP
+    } else {
+        WINDOW_CORNER_RADIUS_DESKTOP
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Glass strength presets (window transparency + backdrop blur)
+// ═══════════════════════════════════════════════════════════════
+
+/// Combined window glass setting: background transparency plus backdrop blur.
+///
+/// Apply with `App::set_glass_strength`, or set both values freely with
+/// `App::set_window_transparency` / `App::set_window_blur`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GlassStrength {
+    /// Window background alpha (`0.05..=1.0`).
+    pub alpha: f32,
+    /// Backdrop blur radius in px (`0.0..=100.0`, needs GTK 4.20+).
+    pub blur: f32,
+}
+
+impl GlassStrength {
+    /// Opaque window, no blur (UIKit default — matches previous behavior).
+    pub const OFF: Self = Self { alpha: 1.0, blur: 0.0 };
+    /// Barely-there glass: mostly opaque with a soft blur behind.
+    pub const SUBTLE: Self = Self { alpha: 0.92, blur: 12.0 };
+    /// Balanced frosted glass (demo default).
+    pub const BALANCED: Self = Self { alpha: 0.85, blur: 20.0 };
+    /// Strong frosted glass: clearly see-through with heavy blur.
+    pub const STRONG: Self = Self { alpha: 0.72, blur: 32.0 };
+
+    pub const fn new(alpha: f32, blur: f32) -> Self {
+        Self { alpha, blur }
+    }
+}
+
+impl Default for GlassStrength {
+    fn default() -> Self { Self::OFF }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Constraints (kept for API compat, but not used by GTK4 backend)
 // ═══════════════════════════════════════════════════════════════
 
@@ -330,5 +408,24 @@ mod tests {
         assert_eq!(p.top, 10.0);
         assert_eq!(p.left, 20.0);
         assert_eq!(p.horizontal_total(), 40.0);
+    }
+
+    #[test]
+    fn window_corner_radius_tokens() {
+        assert_eq!(WINDOW_CORNER_RADIUS_DESKTOP, 26.0);
+        assert_eq!(WINDOW_CORNER_RADIUS_LAPTOP, 24.0);
+        assert_eq!(FormFactor::Desktop.window_corner_radius(), 26.0);
+        assert_eq!(FormFactor::Laptop.window_corner_radius(), 24.0);
+        assert_eq!(window_corner_radius_for(false), 26.0);
+        assert_eq!(window_corner_radius_for(true), 24.0);
+    }
+
+    #[test]
+    fn glass_strength_presets() {
+        assert_eq!(GlassStrength::default(), GlassStrength::OFF);
+        assert_eq!(GlassStrength::OFF.alpha, 1.0);
+        assert_eq!(GlassStrength::OFF.blur, 0.0);
+        assert_eq!(GlassStrength::BALANCED.alpha, 0.85);
+        assert_eq!(GlassStrength::BALANCED.blur, 20.0);
     }
 }

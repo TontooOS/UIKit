@@ -83,6 +83,23 @@ pub trait Widget {
         Vec::new()
     }
 
+    /// Whether this widget draws its own traffic lights and therefore wants
+    /// the system decoration bar hidden (e.g. `Sidebar`). Default false.
+    fn hides_window_bar(&self) -> bool {
+        false
+    }
+
+    /// Recursive version of [`hides_window_bar`](Widget::hides_window_bar):
+    /// true when this widget or any nested child hides the bar. Layouts
+    /// forward through [`children`](Widget::children).
+    fn hides_window_bar_recursive(&self) -> bool {
+        self.hides_window_bar()
+            || self
+                .children()
+                .iter()
+                .any(|c| c.hides_window_bar_recursive())
+    }
+
     fn position_mode(&self) -> PositionMode {
         PositionMode::Auto
     }

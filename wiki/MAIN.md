@@ -13,6 +13,7 @@ TontooUIKit is a native Rust UI toolkit for TontooOS, built on GTK4. It follows 
 | Main index | [MAIN.md](MAIN.md) | This page |
 | Rules | [RULE.md](RULE.md) | Development and usage rules |
 | View | [View.md](View.md) | View base class, subviews, rendering |
+| Style | [Style.md](Style.md) | Design tokens, window corner radii (26px desktop / 24px laptop) |
 | Widgets | [Widgets.md](Widgets.md) | Pre-built UI elements (Label, Button, Toggle, etc.) |
 | Shader | [Shader.md](Shader.md) | GLSL shader loading, built-in effects, ShaderView |
 | ViewController | [ViewController.md](ViewController.md) | View controllers, navigation, lifecycle |
@@ -25,6 +26,24 @@ macOS-style traffic lights. The green button toggles between fullscreen and
 windowed mode using `window.fullscreen()` / `window.unfullscreen()` (the
 `__maximize` action in `dispatch_custom`). The red button closes the window
 (`__close`), the yellow button minimizes it (`__minimize`).
+
+Backend-only macOS fullscreen chrome (no public API change, all in
+`App::run` / `apply_window_chrome`):
+
+- **F11** toggles fullscreen in both modes, **ESC** leaves fullscreen
+  (`FullscreenKeyAction`, wired via a window `EventControllerKey`).
+- The decoration bar stays visible in both modes with identical button
+  positions; entering fullscreen only drops the invisible resize edges.
+- The traffic lights hide in fullscreen (keeping layout space via opacity,
+  so nothing shifts) and reveal while the pointer touches the top 32 px
+  edge, like the macOS menu-bar reveal.
+- Revealed lights keep close (works) and green (exits fullscreen through
+  the regular `__maximize` toggle); the middle minimize button is disabled
+  (stays gray, ignores clicks) via `TrafficLights::minimize_enabled(false)`.
+- Leaving fullscreen (green button, F11, ESC or compositor) restores edges,
+  lights and minimize.
+- `dispatch_custom` rebuilds through the same path, so delegate updates
+  never leak windowed chrome into fullscreen or vice versa.
 
 ## Window Resizing
 
@@ -64,8 +83,10 @@ layout: the left child becomes a fixed sidebar that fills the full window
 height (only its own internal content may scroll), and the right child becomes
 the scrollable content area. Any other root is wrapped in a single scroll
 container. With the window bar enabled, only the content scrolls; the
-traffic-light bar stays fixed. The window defaults to the content's natural
-size capped at half the monitor size in both directions (the content is
+traffic-light bar stays fixed. The window defaults to the requested size
+(`App::new` width/height, including the title bar height), grown to fit the
+content's natural size when larger and capped at half the monitor size in
+both directions (the content is
 measured before wrapping, the monitor size is divided by its scale factor so
 the cap is half the visible screen). Delegate rebuilds via `dispatch_custom`
 re-apply the same layout and the resize handles, so scroll protection and
@@ -140,10 +161,19 @@ App (event loop, window, CSS)
 ## Cross References
 
 - [View.md](View.md) -- base class for all UI elements
+- [Style.md](Style.md) -- design tokens and window corner radii
 - [Widgets.md](Widgets.md) -- pre-built widget catalog
 - [Shader.md](Shader.md) -- GPU shader system
 - [ViewController.md](ViewController.md) -- screen management
 - [Constraints.md](Constraints.md) -- layout system
+
+## Toolkit Identity
+
+Every UIKit app publishes its toolkit via the `TONTOO_TOOLKIT=UIKit`
+environment variable (set automatically by `App::run`, or manually with
+`uikit::app::mark_toolkit()` for custom event loops). CoreWindows reads it
+from `/proc/<pid>/environ` to classify open windows. The constants
+`TOOLKIT_ENV_VAR` / `TOOLKIT_ID` are re-exported in the prelude.
 
 ## Performance Notes
 
@@ -166,3 +196,9 @@ over time:
 - The shader fullscreen quad (VAO/VBO) is created once and reused across
   frames. `ZStack` renders the first child only once (as the main child, not
   as an overlay).
+
+## Changelog
+
+- 2026-09-08: Toolkit identity (`TONTOO_TOOLKIT=UIKit` via `App::run` /
+  `mark_toolkit`, `TOOLKIT_ENV_VAR` / `TOOLKIT_ID` in the prelude) so
+  CoreWindows can classify UIKit windows.

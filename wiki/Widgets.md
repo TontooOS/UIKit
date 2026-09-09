@@ -158,6 +158,47 @@ let view = View::new(list).with_frame(0.0, 0.0, 400.0, 600.0);
 
 macOS-style window controls (close, minimize, maximize). Automatically added by `App` as window chrome.
 
+```rust
+let bar = TrafficLights::new()
+    .without_maximize() // only close + minimize
+    .size(17.0)
+    .spacing(10.0);
+```
+
+| Method | Description |
+|---|---|
+| `at(x, y)` | Set position offsets |
+| `size(f32)` | Set button diameter |
+| `spacing(f32)` | Set gap between buttons |
+| `show_maximize(bool)` | Show or hide the green maximize button (default `true`) |
+| `without_maximize()` | Hide the green button, keep close and minimize |
+| `minimize_enabled(bool)` | Enable the middle minimize button (default `true`); disabled stays gray and ignores clicks |
+| `with_title(text)` | Centered title text (empty = no title) |
+| `show_title(bool)` | Show or hide the title text (default `true`) |
+| `without_title()` | Hide the title text |
+| `with_custom(widget)` | Custom widget filling the bar after the reserved traffic lights; replaces the title zone |
+
+The traffic lights always stay reserved on the left. A custom widget fills
+the bar from after the lights to the right edge and lays out its own
+alignment; the title only renders when no custom widget is set.
+
+Apps use the bar without building it manually:
+
+```rust
+app.set_titlebar_widget(
+    HStack::new()
+        .spacing(8.0)
+        .child(Button::new("Refresh").on_click(|| println!("refresh")))
+        .child(Button::new("Share").on_click(|| println!("share"))),
+);
+app.show_titlebar_title(false); // optional, default `true`
+```
+
+| Method | Description |
+|---|---|
+| `App::set_titlebar_widget(widget)` | Custom title-bar content, rendered on every rebuild including the fullscreen reveal bar |
+| `App::show_titlebar_title(bool)` | Show or hide the title-bar title text (default `true`) |
+
 ## Creating Custom Widgets
 
 Implement `ViewContent` for custom rendering:

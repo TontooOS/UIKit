@@ -8,11 +8,33 @@ use glib::object::Cast;
 use gtk::prelude::*;
 use gtk::{self, Application, ApplicationWindow};
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 /// Scheme of the currently running App: 0 = none, 1 = dark, 2 = light.
 static CURRENT_SCHEME: AtomicU8 = AtomicU8::new(0);
+
+/// Toolkit identity reported to the system (see [`mark_toolkit`]).
+///
+/// CoreWindows reads this value from `/proc/<pid>/environ` to classify open
+/// windows by toolkit (`UIKit`, `TontooUI`, ...). Every TontooOS UI toolkit
+/// sets the same variable with its own id so classification stays uniform.
+pub const TOOLKIT_ENV_VAR: &str = "TONTOO_TOOLKIT";
+
+/// Toolkit id of this library.
+pub const TOOLKIT_ID: &str = "UIKit";
+
+/// Publish this process as a UIKit app for system services.
+///
+/// Sets `TONTOO_TOOLKIT=UIKit` in the process environment. Called
+/// automatically by [`App::run`]; call it manually when driving GTK without
+/// `App` (custom event loops) so CoreWindows still classifies the windows.
+pub fn mark_toolkit() {
+    // SAFETY: single-threaded at startup in practice (`App::run` calls this
+    // before spawning threads); `set_var` is only unsafe in the 2024 edition.
+    unsafe { std::env::set_var(TOOLKIT_ENV_VAR, TOOLKIT_ID) };
+}
 
 fn scheme_to_u8(scheme: ColorScheme) -> u8 {
     match scheme {
@@ -31,6 +53,33 @@ pub fn current_color_scheme() -> Option<ColorScheme> {
         2 => Some(ColorScheme::Light),
         _ => None,
     }
+}
+
+/// Whether the window decoration bar is currently shown.
+///
+/// Views that draw their own traffic lights (e.g. TontooUI `Sidebar`) read
+/// this at render time and drop their own lights when the bar is on.
+/// Returns `false` outside of a running App (standalone previews keep
+/// drawing their own lights, as before).
+pub fn is_window_bar_visible() -> bool {
+    APP_STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .map(|app| app.show_window_bar)
+            .unwrap_or(false)
+    })
+}
+
+/// Effective decoration-bar visibility: a view tree that draws its own
+/// traffic lights hides the system bar automatically, unless explicitly
+/// forced on. Pure helper so the rule stays unit-testable without GTK.
+pub(crate) fn effective_window_bar(
+    user_show_bar: bool,
+    force_window_bar: bool,
+    tree_hides_bar: bool,
+) -> bool {
+    force_window_bar || (user_show_bar && !tree_hides_bar)
 }
 
 /// Color scheme preference.
@@ -117,6 +166,30 @@ impl ColorScheme {
     }
 }
 
+/// Window chrome type.
+///
+/// - `Standard` (default): current UIKit window — slim traffic-light bar,
+///   opaque background, no glass. Existing code is unaffected.
+/// - `Mac`: macOS-style window — taller decoration bar with centered title,
+///   built for the glass look (glass itself stays opt-in via
+///   `set_glass_strength` / `set_window_transparency` / `set_window_blur`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowType {
+    #[default]
+    Standard,
+    Mac,
+}
+
+impl WindowType {
+    /// Title bar height in px for this window type.
+    pub const fn title_bar_height(self) -> i32 {
+        match self {
+            Self::Standard => 31,
+            Self::Mac => 44,
+        }
+    }
+}
+
 /// Application delegate trait — implement this for your app.
 pub trait AppDelegate {
     fn view(&self) -> Box<dyn Widget>;
@@ -137,6 +210,19 @@ struct AppState {
     delegate: Box<dyn AppDelegate>,
     window: Option<gtk::ApplicationWindow>,
     show_window_bar: bool,
+    force_window_bar: bool,
+    resizable: bool,
+    scroll_content: bool,
+    title: String,
+    window_type: WindowType,
+    /// Current inline title bar (always visible, both modes). Backend only.
+    titlebar: Option<gtk::Widget>,
+    /// Custom title-bar widget (fills the bar after the reserved traffic
+    /// lights). Rendered on every rebuild.
+    titlebar_widget: Option<Rc<dyn Widget>>,
+    /// Show the title-bar title text. Only renders without a custom
+    /// widget. Default true.
+    titlebar_show_title: bool,
 }
 
 thread_local! {
@@ -177,26 +263,158 @@ pub fn dispatch_custom(action_name: &str) {
 
             // Delegate custom actions
             app.delegate.handle_custom(action_name);
-            let view = app.delegate.view();
-            let (content, _) = build_window_content(view, app.show_window_bar);
-            let gtk_widget = wrap_window_with_resize_edges(content);
-            gtk_widget.set_hexpand(true);
-            gtk_widget.set_vexpand(true);
-            gtk_widget.set_visible(true);
-            if let Some(ref window) = app.window {
-                // Drop old child first to avoid widget tree accumulation.
-                window.set_child(None::<&gtk::Widget>);
-                window.set_child(Some(&gtk_widget));
-                window.queue_draw();
-            }
         }
+    });
+    // Rebuild content for the current mode (windowed or fullscreen).
+    let fullscreen = APP_STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .and_then(|app| app.window.as_ref())
+            .map(|window| window.is_fullscreen())
+            .unwrap_or(false)
+    });
+    apply_window_chrome(fullscreen);
+}
+
+/// Backend action for the macOS-style chrome keys. F11 toggles fullscreen
+/// in both modes, ESC leaves fullscreen, everything else is ignored.
+/// No public API change: only `App::run` wires this to the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FullscreenKeyAction {
+    Toggle,
+    Exit,
+    Ignored,
+}
+
+fn fullscreen_key_action(key: gtk::gdk::Key, fullscreen: bool) -> FullscreenKeyAction {
+    if key == gtk::gdk::Key::F11 {
+        FullscreenKeyAction::Toggle
+    } else if key == gtk::gdk::Key::Escape && fullscreen {
+        FullscreenKeyAction::Exit
+    } else {
+        FullscreenKeyAction::Ignored
+    }
+}
+
+/// Reveal strip height (px) for the fullscreen traffic lights.
+/// macOS shows the lights while the pointer touches the top edge.
+const FULLSCREEN_REVEAL_PX: f64 = 32.0;
+
+fn fullscreen_reveal_lights(pointer_y: f64) -> bool {
+    pointer_y < FULLSCREEN_REVEAL_PX
+}
+
+/// Title-bar options for [`build_window_content`] (backend only).
+struct TitleBarConfig {
+    custom: Option<Rc<dyn Widget>>,
+    show_title: bool,
+    minimize_enabled: bool,
+}
+
+/// Find the traffic-lights container inside a title bar (tagged
+/// `uikit-lights` in `TrafficLights::to_gtk`). Backend only.
+fn find_lights_widget(root: &gtk::Widget) -> Option<gtk::Widget> {
+    if root.widget_name() == "uikit-lights" {
+        return Some(root.clone());
+    }
+    let mut child = root.first_child();
+    while let Some(current) = child {
+        if let Some(found) = find_lights_widget(&current) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
+}
+
+/// Show or hide the traffic lights inside a visible title bar.
+/// Hidden lights keep their layout space (opacity instead of visibility),
+/// so button positions never shift; they also ignore input while hidden.
+fn set_bar_lights_visible(bar: &gtk::Widget, visible: bool) {
+    if let Some(lights) = find_lights_widget(bar) {
+        lights.set_opacity(if visible { 1.0 } else { 0.0 });
+        lights.set_sensitive(visible);
+    }
+}
+
+/// (Re)build the window child for windowed or fullscreen mode (backend
+/// only, no public API change).
+///
+/// The decoration bar stays visible in both modes with identical button
+/// positions. Fullscreen follows macOS: resize edges are dropped, the
+/// traffic lights hide (keeping layout space) until the pointer touches
+/// the top edge, and the minimize button is disabled (gray, no-op).
+fn apply_window_chrome(fullscreen: bool) {
+    APP_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let app = match state.as_mut() {
+            Some(app) => app,
+            None => return,
+        };
+        let window = match app.window.clone() {
+            Some(window) => window,
+            None => return,
+        };
+        let view = app.delegate.view();
+        let title = app.title.clone();
+        let bar_config = TitleBarConfig {
+            custom: app.titlebar_widget.clone(),
+            show_title: app.titlebar_show_title,
+            minimize_enabled: !fullscreen,
+        };
+        let (mut content, _, bar) = build_window_content(
+            view,
+            app.show_window_bar,
+            app.scroll_content,
+            &title,
+            app.window_type,
+            bar_config,
+        );
+        if app.resizable && !fullscreen {
+            content = wrap_window_with_resize_edges(content);
+        }
+        content.set_hexpand(true);
+        content.set_vexpand(true);
+        content.set_visible(true);
+        if let Some(ref bar) = bar {
+            bar.set_hexpand(true);
+            bar.set_visible(true);
+            set_bar_lights_visible(bar, !fullscreen);
+        }
+        app.titlebar = bar;
+        window.set_child(Some(&content));
+        window.queue_draw();
     });
 }
 
 /// Build the window content column: an optional traffic-light bar on top
-/// (fixed) and the view below. Returns the column widget and the view's
-/// natural size (used to size the window before it is shown).
-fn build_window_content(view: Box<dyn Widget>, show_bar: bool) -> (gtk::Widget, (i32, i32)) {
+/// (fixed) and the view below. Returns the column widget, the view's
+/// natural size (used to size the window before it is shown) and the bar
+/// widget. `bar_config` fills the bar after the reserved traffic lights
+/// and controls title/minimize rendering. When `scroll`
+/// is false the view is used as-is without any scroll container.
+fn build_window_content(view: Box<dyn Widget>, show_bar: bool, scroll: bool, title: &str, window_type: WindowType, bar_config: TitleBarConfig) -> (gtk::Widget, (i32, i32), Option<gtk::Widget>) {
+    // A view tree that draws its own traffic lights (e.g. TontooUI `Sidebar`)
+    // hides the system decoration bar automatically, unless explicitly forced
+    // on. The effective value is written back so views rendered below (which
+    // read `is_window_bar_visible`) stay consistent: exactly one set of
+    // traffic lights. Idempotent across rebuilds.
+    let show_bar = APP_STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        match state.as_mut() {
+            Some(app) => {
+                let effective = effective_window_bar(
+                    app.show_window_bar,
+                    app.force_window_bar,
+                    view.hides_window_bar_recursive(),
+                );
+                app.show_window_bar = effective;
+                effective
+            }
+            None => show_bar,
+        }
+    });
     let view_widget = view.to_gtk();
     view_widget.set_hexpand(true);
     view_widget.set_vexpand(true);
@@ -206,7 +424,10 @@ fn build_window_content(view: Box<dyn Widget>, show_bar: bool) -> (gtk::Widget, 
     // Split layout: an HStack root with exactly two children is treated as a
     // fixed sidebar (left) plus scrollable content (right). Only the content
     // scrolls; the sidebar stays fixed and fills the full window height.
-    let root_layout = if let Some(b) = view_widget.downcast_ref::<gtk::Box>() {
+    // With scrolling disabled the view is embedded directly (fixed windows).
+    let root_layout = if !scroll {
+        view_widget
+    } else if let Some(b) = view_widget.downcast_ref::<gtk::Box>() {
         if b.orientation() == gtk::Orientation::Horizontal {
             let mut children = Vec::new();
             let mut c = b.first_child();
@@ -248,13 +469,32 @@ fn build_window_content(view: Box<dyn Widget>, show_bar: bool) -> (gtk::Widget, 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.set_hexpand(true);
     column.set_vexpand(true);
+    let mut bar_widget: Option<gtk::Widget> = None;
     if show_bar {
-        let bar = crate::widgets::TrafficLights::new().to_gtk();
+        let mut lights = crate::widgets::TrafficLights::new()
+            .with_title(title)
+            .bar_height(window_type.title_bar_height() as f32)
+            .show_title(bar_config.show_title)
+            .minimize_enabled(bar_config.minimize_enabled);
+        if let Some(custom) = bar_config.custom {
+            lights = lights.with_custom_shared(custom);
+        }
+        let bar = lights.to_gtk();
         bar.set_hexpand(true);
+        // Solid title bar: opaque scheme background via `.uikit-titlebar`
+        // (beats the widget's own transparent `windowhandle` rule).
+        bar.add_css_class("uikit-titlebar");
         column.append(&bar);
+        bar_widget = Some(bar);
     }
     column.append(&root_layout);
-    (column.upcast(), (nat_w, nat_h))
+    // Include the title bar height so the window fits bar + content.
+    let nat = if show_bar {
+        (nat_w, nat_h + window_type.title_bar_height())
+    } else {
+        (nat_w, nat_h)
+    };
+    (column.upcast(), nat, bar_widget)
 }
 
 /// Wrap content in a scroll container so oversized content gets scrollbars
@@ -272,6 +512,22 @@ fn wrap_scrollable(content: gtk::Widget) -> gtk::Widget {
 const RESIZE_EDGE_PX: i32 = 6;
 /// Size of the corner-resize squares in pixels.
 const RESIZE_CORNER_PX: i32 = 14;
+
+/// Resolve the window default size: the requested size is the base, grown
+/// to fit the content natural size when larger, capped at half the monitor
+/// so huge content scrolls instead of opening a giant window.
+fn resolve_default_size(
+    nat_w: i32,
+    nat_h: i32,
+    req_w: i32,
+    req_h: i32,
+    cap_w: i32,
+    cap_h: i32,
+) -> (i32, i32) {
+    let dw = nat_w.max(req_w).min(cap_w).max(320);
+    let dh = nat_h.max(req_h).min(cap_h).max(240);
+    (dw, dh)
+}
 
 /// Window edges and corners that can be grabbed to resize an undecorated
 /// window (the compositor provides no resize borders for them).
@@ -688,8 +944,42 @@ pub struct App {
     glass: Option<(f32, f32, f32)>,
     delegate: Option<Box<dyn AppDelegate>>,
     show_window_bar: bool,
+    /// Force the decoration bar on even when the root view draws its own
+    /// traffic lights (see [`App::force_window_bar`]). Default false.
+    force_window_bar: bool,
+    /// If true, the window can be resized (edge handles + resizable). Default true.
+    resizable: bool,
+    /// If true, oversized content is wrapped in a scroll container. Default true.
+    scroll_content: bool,
+    /// Device form factor selecting the window corner radius.
+    /// Desktop = 26px, Laptop = 24px (matches MacTahoe GTK theme $wm_radius).
+    /// Default Desktop so the 26px radius is always set unless laptop mode is enabled.
+    form_factor: crate::style::FormFactor,
+    /// Window chrome type (Standard = current behavior, Mac = macOS-style
+    /// decoration bar). Default Standard so existing apps are unaffected.
+    window_type: WindowType,
+    /// Window frame (margin, corner radius, border, shadow). Default true.
+    /// [`App::no_window_frame`] disables it.
+    window_frame: bool,
+    /// Window background transparency (1.0 = opaque default).
+    /// Below 1.0 the window background becomes semi-transparent (adaptive
+    /// rgba: dark 30,30,30 / light 245,245,247) so the wallpaper or windows
+    /// behind show through. Real background blur needs compositor support.
+    window_alpha: f32,    /// Window backdrop blur radius in px (0.0 = off, default).
+    /// Emits `backdrop-filter: blur()` on the window (supported since GTK 4.20;
+    /// ignored by older GTK). In-window backdrop content is blurred by GTK
+    /// itself; blurring what is *behind* the window additionally needs a
+    /// compositor with `ext-background-effect-v1` support.
+    window_blur: f32,
+    /// If set, the window opens at exactly this size, bypassing the
+    /// content-natural-size and half-monitor cap. Default None.
+    force_size: Option<(i32, i32)>,
     /// Optional per-frame callback (dt in seconds) driven by a 60 Hz timer.
     tick: Option<Box<dyn FnMut(f32) + Send>>,
+    /// Custom title-bar widget (see [`App::set_titlebar_widget`]).
+    titlebar_widget: Option<Rc<dyn Widget>>,
+    /// Title-bar title visibility (see [`App::show_titlebar_title`]).
+    titlebar_show_title: bool,
 }
 
 impl App {
@@ -704,7 +994,18 @@ impl App {
             glass: None,
             delegate: None,
             show_window_bar: true,
+            force_window_bar: false,
+            resizable: true,
+            scroll_content: true,
+            form_factor: crate::style::FormFactor::Desktop,
+            window_type: WindowType::Standard,
+            window_frame: true,
+            window_alpha: 1.0,
+            window_blur: 0.0,
+            force_size: None,
             tick: None,
+            titlebar_widget: None,
+            titlebar_show_title: true,
         }
     }
 
@@ -759,6 +1060,66 @@ impl App {
         self
     }
 
+    /// Force the decoration bar on, even when the root view draws its own
+    /// traffic lights (e.g. TontooUI `Sidebar`, which hides the bar
+    /// automatically). Views then drop their own lights instead — exactly
+    /// one set of traffic lights stays visible.
+    pub fn force_window_bar(&mut self) -> &mut Self {
+        self.show_window_bar = true;
+        self.force_window_bar = true;
+        self
+    }
+
+    /// Disable the window frame: no margin, no corner radius, no border,
+    /// no shadow (square content to the screen edge). The title bar (if
+    /// enabled) and the resize handles follow `no_window_bar` / `resizable`
+    /// as before. Default is framed.
+    pub fn no_window_frame(&mut self) -> &mut Self {
+        self.window_frame = false;
+        self
+    }
+
+    /// Custom widget for the title bar: it fills the bar from after the
+    /// reserved traffic lights to the right edge (the widget lays out its
+    /// own alignment) and replaces the title zone. Rendered on every
+    /// rebuild, including the fullscreen reveal bar.
+    pub fn set_titlebar_widget(&mut self, widget: impl Widget + 'static) -> &mut Self {
+        self.titlebar_widget = Some(Rc::new(widget));
+        self
+    }
+
+    /// Show or hide the title-bar title text. Default true. The title only
+    /// renders when no custom title-bar widget is set.
+    pub fn show_titlebar_title(&mut self, show: bool) -> &mut Self {
+        self.titlebar_show_title = show;
+        self
+    }
+
+    /// Lock the window to its initial size: no resize handles and the
+    /// window manager is told the window is not resizable. Default is
+    /// resizable. Useful for fixed-size cards like About windows.
+    pub fn fixed_size(&mut self) -> &mut Self {
+        self.resizable = false;
+        self
+    }
+
+    /// Disable the automatic scroll container. Use only when the content
+    /// is guaranteed to fit the window (e.g. fixed-size cards), otherwise
+    /// oversized content is clipped instead of scrollable. Default is
+    /// scrollable.
+    pub fn no_scroll(&mut self) -> &mut Self {
+        self.scroll_content = false;
+        self
+    }
+
+    /// Force the window to open at exactly this size, bypassing the
+    /// content-natural-size measurement and the half-monitor cap used by
+    /// default. Opt-in only — default is None (automatic sizing).
+    pub fn force_size(&mut self, width: i32, height: i32) -> &mut Self {
+        self.force_size = Some((width, height));
+        self
+    }
+
     /// Auto-detect and set the color scheme from system settings (enables live follow).
     pub fn auto_color_scheme(&mut self) {
         self.color_scheme = ColorScheme::detect_system();
@@ -779,6 +1140,76 @@ impl App {
     pub fn clear_glass(&mut self) {
         self.glass = None;
     }
+
+    /// Set the device form factor (selects window corner radius).
+    pub fn set_form_factor(&mut self, form_factor: crate::style::FormFactor) -> &mut Self {
+        self.form_factor = form_factor;
+        self
+    }
+
+    /// Enable laptop mode (24px window corners) or disable it (26px desktop corners).
+    pub fn set_laptop_mode(&mut self, laptop: bool) -> &mut Self {
+        self.form_factor = if laptop {
+            crate::style::FormFactor::Laptop
+        } else {
+            crate::style::FormFactor::Desktop
+        };
+        self
+    }
+
+    pub fn form_factor(&self) -> crate::style::FormFactor { self.form_factor }
+
+    /// Active window corner radius in px (26 desktop / 24 laptop).
+    pub fn window_corner_radius(&self) -> f32 { self.form_factor.window_corner_radius() }
+
+    /// Set window background transparency (`1.0` = opaque default).
+    ///
+    /// Values below `1.0` make the window background semi-transparent so the
+    /// wallpaper or windows behind show through. The color stays adaptive:
+    /// dark uses `rgba(30, 30, 30, alpha)`, light uses
+    /// `rgba(245, 245, 247, alpha)`. Clamped to `0.05..=1.0`.
+    ///
+    /// Note: this is transparency only. Live background blur cannot be done
+    /// from the client side and needs compositor blur-behind support.
+    pub fn set_window_transparency(&mut self, alpha: f32) -> &mut Self {
+        self.window_alpha = alpha.clamp(0.05, 1.0);
+        self
+    }
+
+    pub fn window_alpha(&self) -> f32 { self.window_alpha }
+
+    /// Set the window chrome type (`Standard` default, `Mac` opt-in).
+    /// `Standard` keeps current behavior; `Mac` uses the taller macOS-style
+    /// decoration bar with centered title.
+    pub fn set_window_type(&mut self, window_type: WindowType) -> &mut Self {
+        self.window_type = window_type;
+        self
+    }
+
+    pub fn window_type(&self) -> WindowType { self.window_type }
+
+    /// Apply a glass preset (transparency + blur together).
+    /// Default is `GlassStrength::OFF` (opaque, no blur — as before).
+    pub fn set_glass_strength(&mut self, strength: crate::style::GlassStrength) -> &mut Self {
+        self.set_window_transparency(strength.alpha);
+        self.set_window_blur(strength.blur);
+        self
+    }
+
+    /// Set window backdrop blur radius in px (`0.0` = off, default).
+    ///
+    /// Emits `backdrop-filter: blur()` on the window background (supported
+    /// since GTK 4.20; older GTK ignores the property). Requires a
+    /// semi-transparent background (`set_window_transparency` below `1.0`)
+    /// to be visible. GTK itself blurs backdrop content inside the window;
+    /// blurring what is *behind* the window additionally needs a compositor
+    /// with `ext-background-effect-v1` support. Clamped to `0.0..=100.0`.
+    pub fn set_window_blur(&mut self, sigma: f32) -> &mut Self {
+        self.window_blur = sigma.clamp(0.0, 100.0);
+        self
+    }
+
+    pub fn window_blur(&self) -> f32 { self.window_blur }
 
     /// Register a per-frame callback invoked ~60 times per second.
     ///
@@ -844,19 +1275,105 @@ impl App {
     }
 
     fn build_css(&self) -> String {
-        Self::css_for_scheme(self.color_scheme, self.glass)
+        Self::css_for_scheme(self.color_scheme, self.glass, self.window_corner_radius(), self.window_alpha, self.window_blur, self.window_frame)
     }
 
-    fn css_for_scheme(scheme: ColorScheme, glass: Option<(f32, f32, f32)>) -> String {
-        let (bg, fg) = match scheme {
-            ColorScheme::Dark => ("#1E1E1E", "#F5F5F7"),
-            ColorScheme::Light => ("#F5F5F7", "#1E1E1E"),
+    fn css_for_scheme(scheme: ColorScheme, glass: Option<(f32, f32, f32)>, window_radius: f32, window_alpha: f32, window_blur: f32, window_frame: bool) -> String {
+        let alpha = window_alpha.clamp(0.05, 1.0);
+        let (bg_rgba, bg_opaque, fg) = match scheme {
+            ColorScheme::Dark => (
+                format!("rgba(30, 30, 30, {alpha:.2})"),
+                "#1E1E1E",
+                "#F5F5F7",
+            ),
+            ColorScheme::Light => (
+                format!("rgba(245, 245, 247, {alpha:.2})"),
+                "#F5F5F7",
+                "#1E1E1E",
+            ),
+        };
+        // Thin window edge: white in dark mode, black in light mode (like macOS /
+        // Parallels card in the reference screenshot), plus outer ring + drop shadow.
+        let (edge, inner, outer) = match scheme {
+            ColorScheme::Dark => (
+                "rgba(255, 255, 255, 0.14)",
+                "rgba(255, 255, 255, 0.08)",
+                "rgba(0, 0, 0, 0.75)",
+            ),
+            ColorScheme::Light => (
+                "rgba(0, 0, 0, 0.12)",
+                "rgba(255, 255, 255, 0.9)",
+                "rgba(0, 0, 0, 0.12)",
+            ),
+        };
+        // Backdrop blur (GTK 4.20+). Empty when off so older GTK versions
+        // and opaque windows keep byte-identical CSS.
+        let blur_css = if window_blur > 0.0 {
+            format!("backdrop-filter: blur({:.0}px);", window_blur.clamp(0.0, 100.0))
+        } else {
+            String::new()
         };
         let mut css = format!(
             "window {{
-                background-color: {bg};
+                background-color: {bg_rgba};
                 color: {fg};
+                {blur_css}
+                border-radius: {window_radius:.0}px;
+                border: 1px solid {edge};
+                box-shadow: inset 0 1px 0 {inner}, 0 3px 6px rgb(0 0 0 / 15%), 0 7px 24px rgb(0 0 0 / 12%), 0 12px 32px rgb(0 0 0 / 8%), 0 0 0 1px {outer};
+                margin: 24px;
                 transition: background-color 320ms cubic-bezier(0.32,0.72,0,1), color 320ms cubic-bezier(0.32,0.72,0,1);
+            }}
+            window:backdrop {{
+                box-shadow: inset 0 1px 0 {inner}, 0 3px 6px rgb(0 0 0 / 10%), 0 7px 24px rgb(0 0 0 / 6%), 0 12px 32px transparent, 0 0 0 1px {outer};
+            }}
+            window decoration {{
+                border-radius: {window_radius:.0}px;
+                border: 1px solid {edge};
+                box-shadow: inset 0 1px 0 {inner}, 0 3px 6px rgb(0 0 0 / 15%), 0 7px 24px rgb(0 0 0 / 12%), 0 12px 32px rgb(0 0 0 / 8%), 0 0 0 1px {outer};
+            }}
+            window decoration:backdrop {{
+                box-shadow: inset 0 1px 0 {inner}, 0 3px 6px rgb(0 0 0 / 10%), 0 7px 24px rgb(0 0 0 / 6%), 0 12px 32px transparent, 0 0 0 1px {outer};
+            }}
+            window > box, window > overlay {{
+                border-radius: {window_radius:.0}px;
+            }}
+            window.maximized, window.fullscreen {{
+                margin: 0;
+                border-radius: 0;
+                border: none;
+                box-shadow: none;
+            }}
+            window.maximized decoration, window.fullscreen decoration {{
+                border-radius: 0;
+                border: none;
+                box-shadow: none;
+            }}
+            window.maximized > box, window.maximized > overlay,
+            window.fullscreen > box, window.fullscreen > overlay {{
+                border-radius: 0;
+            }}
+            window.maximized .uikit-titlebar, window.fullscreen .uikit-titlebar {{
+                border-radius: 0;
+            }}
+            window.maximized scrolledwindow, window.fullscreen scrolledwindow,
+            window.maximized scrolledwindow viewport, window.fullscreen scrolledwindow viewport {{
+                border-radius: 0;
+            }}
+            window.tiled, window.tiled-top, window.tiled-left, window.tiled-right, window.tiled-bottom {{
+                margin: 0;
+                border-radius: 0;
+                box-shadow: none;
+            }}
+            .uikit-titlebar {{
+                background-color: {bg_opaque};
+                border-radius: {window_radius:.0}px {window_radius:.0}px 0 0;
+                border-bottom: 1px solid {edge};
+            }}
+            .uikit-titlebar-title {{
+                font-family: 'SF Pro Display';
+                font-size: 13px;
+                font-weight: 600;
             }}
             window * {{
                 transition: background-color 320ms cubic-bezier(0.32,0.72,0,1), color 320ms cubic-bezier(0.32,0.72,0,1), background 320ms cubic-bezier(0.32,0.72,0,1);
@@ -888,14 +1405,16 @@ impl App {
                 background: rgba(255, 255, 255, 0.5);
             }}
             scrolledwindow {{
-                background: {bg};
+                background: transparent;
+                border-radius: {window_radius:.0}px;
                 transition: background-color 320ms cubic-bezier(0.32,0.72,0,1);
             }}
             scrolledwindow viewport {{
-                background: {bg};
+                background: transparent;
+                border-radius: {window_radius:.0}px;
                 transition: background-color 320ms cubic-bezier(0.32,0.72,0,1);
             }}",
-            bg = bg, fg = fg,
+            bg_rgba = bg_rgba, bg_opaque = bg_opaque, fg = fg,
         );
         if let Some((milkiness, alpha, _sigma)) = glass {
             let glass_alpha = alpha;
@@ -908,10 +1427,23 @@ impl App {
                 }}"
             ));
         }
+        if !window_frame {
+            // Frameless override (same specificity, later wins): square
+            // content to the screen edge, no margin/border/shadow.
+            css.push_str(
+                "\n/* no-window-frame */\nwindow { margin: 0; border-radius: 0; border: none; box-shadow: none; }\n\
+                 window:backdrop { box-shadow: none; }\n\
+                 window decoration { border-radius: 0; border: none; box-shadow: none; }\n\
+                 window decoration:backdrop { box-shadow: none; }\n\
+                 window > box, window > overlay { border-radius: 0; }\n\
+                 .uikit-titlebar { border-radius: 0; }\n\
+                 window scrolledwindow, window scrolledwindow viewport { border-radius: 0; }",
+            );
+        }
         css
     }
 
-    fn setup_live_theme_watcher(provider: gtk::CssProvider, glass: Option<(f32, f32, f32)>) {
+    fn setup_live_theme_watcher(provider: gtk::CssProvider, glass: Option<(f32, f32, f32)>, window_radius: f32, window_alpha: f32, window_blur: f32, window_frame: bool) {
         // Watch GTK settings for live GNOME theme changes
         let update = {
             let provider = provider.clone();
@@ -922,7 +1454,7 @@ impl App {
                     return;
                 }
                 CURRENT_SCHEME.store(scheme_to_u8(new_scheme), Ordering::Relaxed);
-                let new_css = Self::css_for_scheme(new_scheme, glass);
+                let new_css = Self::css_for_scheme(new_scheme, glass, window_radius, window_alpha, window_blur, window_frame);
                 provider.load_from_string(&new_css);
                 // Force redraw of all windows so scrolledwindow/viewport pick up new bg immediately
                 if let Some(display) = gtk::gdk::Display::default() {
@@ -968,6 +1500,8 @@ impl App {
 
     /// Run the application (blocking event loop).
     pub fn run(&mut self) {
+        // Identify this process as a UIKit app for CoreWindows classification.
+        mark_toolkit();
         // Fix WSLg rendering: force Wayland socket link + software renderer.
         Self::fix_wslg_environment();
 
@@ -987,9 +1521,14 @@ impl App {
         let title = self.title.clone();
         let width = self.width;
         let height = self.height;
+        let force_size = self.force_size;
         let css = self.build_css();
         let follow_system = self.follow_system;
         let glass_for_watcher = self.glass;
+        let radius_for_watcher = self.window_corner_radius();
+        let alpha_for_watcher = self.window_alpha;
+        let blur_for_watcher = self.window_blur;
+        let frame_for_watcher = self.window_frame;
         let tick = self.tick.take();
         let has_delegate = self.delegate.is_some();
         let initial_root = std::cell::RefCell::new(self.root.take());
@@ -1001,6 +1540,14 @@ impl App {
                 delegate,
                 window: None,
                 show_window_bar: self.show_window_bar,
+                force_window_bar: self.force_window_bar,
+                resizable: self.resizable,
+                scroll_content: self.scroll_content,
+                title: self.title.clone(),
+                window_type: self.window_type,
+                titlebar: None,
+                titlebar_widget: self.titlebar_widget.clone(),
+                titlebar_show_title: self.titlebar_show_title,
             });
         });
 
@@ -1043,11 +1590,28 @@ impl App {
 
             let mut content_nat: (i32, i32) = (0, 0);
             let gtk_widget: Option<gtk::Widget> = initial_view.map(|view| {
-                let state = APP_STATE.with(|s| s.borrow().as_ref().map(|s| s.show_window_bar).unwrap_or(true));
-                let (content, nat) = build_window_content(view, state);
+                let (bar, scroll, resizable, window_type, bar_config) = APP_STATE.with(|s| {
+                    s.borrow()
+                        .as_ref()
+                        .map(|s| (s.show_window_bar, s.scroll_content, s.resizable, s.window_type, TitleBarConfig {
+                            custom: s.titlebar_widget.clone(),
+                            show_title: s.titlebar_show_title,
+                            minimize_enabled: true,
+                        }))
+                        .unwrap_or((true, true, true, WindowType::Standard, TitleBarConfig {
+                            custom: None,
+                            show_title: true,
+                            minimize_enabled: true,
+                        }))
+                });
+                let (content, nat, _) = build_window_content(view, bar, scroll, &title, window_type, bar_config);
                 content_nat = nat;
                 // Add invisible edge/corner resize handles around the content.
-                wrap_window_with_resize_edges(content)
+                if resizable {
+                    wrap_window_with_resize_edges(content)
+                } else {
+                    content
+                }
             });
 
             // The view is already wrapped in its own scroll container inside
@@ -1068,13 +1632,14 @@ impl App {
 
             let window = builder.build();
 
-            // Allow window resizing even when undecorated.
-            window.set_resizable(true);
+            // Allow window resizing even when undecorated (unless fixed-size).
+            let resizable = APP_STATE.with(|s| s.borrow().as_ref().map(|s| s.resizable).unwrap_or(true));
+            window.set_resizable(resizable);
 
-// Default the window to the content's natural size, capped at half the
-            // monitor size in both directions. The window therefore never
-            // grows to show everything when the content is huge — oversized
-            // content scrolls instead. The app can still resize afterwards.
+// Default the window to the requested size, grown to fit the content
+            // natural size when larger and capped at half the monitor size in
+            // both directions. Oversized content scrolls instead of opening a
+            // giant window. The app can still resize afterwards.
             let display = gtk::prelude::WidgetExt::display(&window);
             let monitor = display
                 .monitors()
@@ -1085,7 +1650,9 @@ impl App {
                         .surface()
                         .and_then(|s| display.monitor_at_surface(&s))
                 });
-            if let Some(monitor) = monitor {
+            if let Some((fw, fh)) = force_size {
+                window.set_default_size(fw.max(320), fh.max(240));
+            } else if let Some(monitor) = monitor {
                 // Divide by the monitor scale factor first: WSLg / HiDPI
                 // reports the virtual resolution (e.g. 2560x1440) while the
                 // visible area is half that, so the cap must use the scaled
@@ -1097,9 +1664,8 @@ impl App {
                 let cap_w = (vis_w / 2).max(320);
                 let cap_h = (vis_h / 2).max(240);
                 let (nat_w, nat_h) = content_nat;
-                let dw = if nat_w > 0 { nat_w.min(cap_w) } else { width.min(cap_w) };
-                let dh = if nat_h > 0 { nat_h.min(cap_h) } else { height.min(cap_h) };
-                window.set_default_size(dw.max(320), dh.max(240));
+                let (dw, dh) = resolve_default_size(nat_w, nat_h, width, height, cap_w, cap_h);
+                window.set_default_size(dw, dh);
             }
 
             // Ensure the default cursor is visible (fixes invisible cursor on
@@ -1114,9 +1680,70 @@ impl App {
                 }
             });
 
+            // Backend-only macOS chrome keys: F11 toggles fullscreen in
+            // both modes, ESC leaves fullscreen. No public API change.
+            let key = gtk::EventControllerKey::new();
+            let window_weak = window.downgrade();
+            key.connect_key_pressed(move |_, keyval, _, _| {
+                let Some(window) = window_weak.upgrade() else {
+                    return glib::Propagation::Proceed;
+                };
+                match fullscreen_key_action(keyval, window.is_fullscreen()) {
+                    FullscreenKeyAction::Toggle => {
+                        if window.is_fullscreen() {
+                            window.unfullscreen();
+                        } else {
+                            window.fullscreen();
+                        }
+                        glib::Propagation::Stop
+                    }
+                    FullscreenKeyAction::Exit => {
+                        window.unfullscreen();
+                        glib::Propagation::Stop
+                    }
+                    FullscreenKeyAction::Ignored => glib::Propagation::Proceed,
+                }
+            });
+            window.add_controller(key);
+
+            // Backend-only macOS fullscreen chrome: the bar stays visible
+            // in both modes, the traffic lights reveal on top-edge hover.
+            // No public API change.
+            window.connect_fullscreened_notify(|window| {
+                apply_window_chrome(window.is_fullscreen());
+            });
+            let motion = gtk::EventControllerMotion::new();
+            motion.connect_motion(|_, _x, y| {
+                APP_STATE.with(|state| {
+                    if let Some(app) = state.borrow().as_ref() {
+                        if let (Some(window), Some(bar)) =
+                            (app.window.clone(), app.titlebar.clone())
+                        {
+                            if window.is_fullscreen() {
+                                set_bar_lights_visible(&bar, fullscreen_reveal_lights(y));
+                            }
+                        }
+                    }
+                });
+            });
+            motion.connect_leave(|_| {
+                APP_STATE.with(|state| {
+                    if let Some(app) = state.borrow().as_ref() {
+                        if let (Some(window), Some(bar)) =
+                            (app.window.clone(), app.titlebar.clone())
+                        {
+                            if window.is_fullscreen() {
+                                set_bar_lights_visible(&bar, false);
+                            }
+                        }
+                    }
+                });
+            });
+            window.add_controller(motion);
+
             // Live GNOME theme watcher — updates CSS with animation on system change
             if follow_system {
-                Self::setup_live_theme_watcher(css_provider.clone(), glass_for_watcher);
+                Self::setup_live_theme_watcher(css_provider.clone(), glass_for_watcher, radius_for_watcher, alpha_for_watcher, blur_for_watcher, frame_for_watcher);
             }
 
             window.present();
@@ -1152,5 +1779,298 @@ mod tests {
         assert_eq!(app.color_scheme(), ColorScheme::Dark);
         app.set_color_scheme(ColorScheme::Light);
         assert_eq!(app.color_scheme(), ColorScheme::Light);
+    }
+
+    #[test]
+    fn app_fixed_size_no_scroll() {
+        let app = App::new("Test", 800, 600);
+        assert!(app.resizable);
+        assert!(app.scroll_content);
+        let mut fixed = App::new("Card", 320, 580);
+        fixed.fixed_size();
+        fixed.no_scroll();
+        assert!(!fixed.resizable);
+        assert!(!fixed.scroll_content);
+    }
+
+    #[test]
+    fn effective_window_bar_rules() {
+        // Forced bar always wins, even with a sidebar.
+        assert!(effective_window_bar(true, true, true));
+        assert!(effective_window_bar(false, true, true));
+        // A hiding tree switches an enabled bar off.
+        assert!(!effective_window_bar(true, false, true));
+        // Without a hiding tree the user choice stands.
+        assert!(effective_window_bar(true, false, false));
+        assert!(!effective_window_bar(false, false, false));
+    }
+
+    #[test]
+    fn hides_window_bar_recursive_walks_children() {
+        use crate::widget::WidgetId;
+
+        struct Plain;
+        impl Widget for Plain {
+            fn id(&self) -> WidgetId {
+                0
+            }
+            fn to_gtk(&self) -> gtk::Widget {
+                unimplemented!()
+            }
+        }
+
+        struct Hider;
+        impl Widget for Hider {
+            fn id(&self) -> WidgetId {
+                1
+            }
+            fn to_gtk(&self) -> gtk::Widget {
+                unimplemented!()
+            }
+            fn hides_window_bar(&self) -> bool {
+                true
+            }
+        }
+
+        struct Parent {
+            child: Box<dyn Widget>,
+        }
+        impl Widget for Parent {
+            fn id(&self) -> WidgetId {
+                2
+            }
+            fn to_gtk(&self) -> gtk::Widget {
+                unimplemented!()
+            }
+            fn children(&self) -> Vec<&dyn Widget> {
+                vec![self.child.as_ref()]
+            }
+        }
+
+        assert!(!Plain.hides_window_bar_recursive());
+        assert!(Hider.hides_window_bar_recursive());
+        assert!(Parent {
+            child: Box::new(Hider)
+        }
+        .hides_window_bar_recursive());
+        assert!(!Parent {
+            child: Box::new(Plain)
+        }
+        .hides_window_bar_recursive());
+    }
+
+    #[test]
+    fn force_window_bar_opt_in() {
+        let mut app = App::new("Test", 800, 600);
+        assert!(!app.force_window_bar);
+        app.force_window_bar();
+        assert!(app.force_window_bar);
+        assert!(app.show_window_bar);
+    }
+
+    #[test]
+    fn app_force_size_opt_in() {
+        let app = App::new("Test", 800, 600);
+        assert_eq!(app.force_size, None);
+        let mut big = App::new("Big", 800, 600);
+        big.force_size(820, 1840);
+        assert_eq!(big.force_size, Some((820, 1840)));
+    }
+
+    #[test]
+    fn app_window_radius_defaults_to_desktop() {
+        let app = App::new("Test", 800, 600);
+        assert_eq!(app.form_factor(), crate::style::FormFactor::Desktop);
+        assert_eq!(app.window_corner_radius(), 26.0);
+        let css = app.build_css();
+        assert!(css.contains("border-radius: 26px"));
+        assert!(css.contains("window decoration"));
+        assert!(css.contains("box-shadow: inset 0 1px 0"));
+        // Dark mode gets a thin white edge.
+        assert!(css.contains("border: 1px solid rgba(255, 255, 255, 0.14)"));
+    }
+
+    #[test]
+    fn app_window_radius_laptop_mode() {
+        let mut app = App::new("Test", 800, 600);
+        app.set_laptop_mode(true);
+        assert_eq!(app.form_factor(), crate::style::FormFactor::Laptop);
+        assert_eq!(app.window_corner_radius(), 24.0);
+        let css = app.build_css();
+        assert!(css.contains("border-radius: 24px"));
+        assert!(css.contains("box-shadow: inset 0 1px 0"));
+    }
+
+    #[test]
+    fn app_window_edge_light_mode() {
+        let mut app = App::new("Test", 800, 600);
+        app.set_color_scheme(ColorScheme::Light);
+        let css = app.build_css();
+        // Light mode gets a thin black edge.
+        assert!(css.contains("border: 1px solid rgba(0, 0, 0, 0.12)"));
+    }
+
+    #[test]
+    fn app_window_opaque_by_default() {
+        let app = App::new("Test", 800, 600);
+        assert_eq!(app.window_alpha(), 1.0);
+        assert!(app.build_css().contains("rgba(30, 30, 30, 1.00)"));
+    }
+
+    #[test]
+    fn app_window_transparency_adaptive() {
+        let mut app = App::new("Test", 800, 600);
+        app.set_window_transparency(0.8);
+        assert_eq!(app.window_alpha(), 0.8);
+        assert!(app.build_css().contains("rgba(30, 30, 30, 0.80)"));
+
+        app.set_color_scheme(ColorScheme::Light);
+        assert!(app.build_css().contains("rgba(245, 245, 247, 0.80)"));
+    }
+
+    #[test]
+    fn app_window_transparency_clamped() {
+        let mut app = App::new("Test", 800, 600);
+        app.set_window_transparency(5.0);
+        assert_eq!(app.window_alpha(), 1.0);
+        app.set_window_transparency(-1.0);
+        assert_eq!(app.window_alpha(), 0.05);
+    }
+
+    #[test]
+    fn app_window_blur_off_by_default() {
+        let app = App::new("Test", 800, 600);
+        assert_eq!(app.window_blur(), 0.0);
+        assert!(!app.build_css().contains("backdrop-filter"));
+    }
+
+    #[test]
+    fn app_window_blur_emits_css() {
+        let mut app = App::new("Test", 800, 600);
+        app.set_window_transparency(0.85);
+        app.set_window_blur(20.0);
+        assert_eq!(app.window_blur(), 20.0);
+        assert!(app.build_css().contains("backdrop-filter: blur(20px)"));
+    }
+
+    #[test]
+    fn app_window_blur_clamped() {
+        let mut app = App::new("Test", 800, 600);
+        app.set_window_blur(500.0);
+        assert_eq!(app.window_blur(), 100.0);
+        app.set_window_blur(-5.0);
+        assert_eq!(app.window_blur(), 0.0);
+    }
+
+    #[test]
+    fn app_window_frame_on_by_default() {
+        let css = App::new("Test", 800, 600).build_css();
+        assert!(!css.contains("no-window-frame"));
+        assert!(css.contains("margin: 24px;"));
+    }
+
+    #[test]
+    fn app_no_window_frame_override() {
+        let mut app = App::new("Test", 800, 600);
+        app.no_window_frame();
+        let css = app.build_css();
+        // Override block present (same specificity, later wins).
+        assert!(css.contains("/* no-window-frame */"));
+        assert!(css.contains(".uikit-titlebar { border-radius: 0; }"));
+        assert!(css.contains("window > box, window > overlay { border-radius: 0; }"));
+    }
+
+    #[test]
+    fn app_titlebar_is_opaque() {
+        let app = App::new("Test", 800, 600);
+        let css = app.build_css();
+        assert!(css.contains(".uikit-titlebar"));
+        assert!(css.contains(".uikit-titlebar-title"));
+        // Dark title bar is solid, not transparent.
+        assert!(css.contains("background-color: #1E1E1E"));
+
+        let mut light = App::new("Test", 800, 600);
+        light.set_color_scheme(ColorScheme::Light);
+        assert!(light.build_css().contains("background-color: #F5F5F7"));
+    }
+
+    #[test]
+    fn app_fullscreen_has_no_margin_or_radius() {
+        // Fullscreen/maximized/tiled windows fill the screen: no shadow
+        // margin, no rounded corners, no shadow.
+        let css = App::new("Test", 800, 600).build_css();
+        assert!(css.contains("window.maximized, window.fullscreen"));
+        assert!(css.contains("window.tiled"));
+        assert!(css.contains("margin: 0;"));
+    }
+
+    #[test]
+    fn app_content_single_layer_background() {
+        // Only the window itself carries the alpha background; scrolled
+        // containers stay transparent so no stacked darker box appears.
+        let mut app = App::new("Test", 800, 600);
+        app.set_window_transparency(0.85);
+        let css = app.build_css();
+        assert!(css.contains("rgba(30, 30, 30, 0.85)"));
+        assert!(css.contains("scrolledwindow"));
+        assert!(!css.contains("scrolledwindow viewport {\n                background: rgba"));
+    }
+
+    #[test]
+    fn default_size_honors_requested() {
+        // Requested size is the base.
+        assert_eq!(resolve_default_size(100, 100, 640, 480, 960, 540), (640, 480));
+        // Grows to fit larger content, capped at half the monitor.
+        assert_eq!(resolve_default_size(800, 500, 640, 480, 960, 540), (800, 500));
+        assert_eq!(resolve_default_size(2000, 2000, 640, 480, 960, 540), (960, 540));
+        // Never below minimum window size.
+        assert_eq!(resolve_default_size(0, 0, 100, 100, 960, 540), (320, 240));
+    }
+
+    #[test]
+    fn window_type_defaults_to_standard() {
+        let app = App::new("Test", 800, 600);
+        assert_eq!(app.window_type(), WindowType::Standard);
+        assert_eq!(WindowType::Standard.title_bar_height(), 31);
+        assert_eq!(WindowType::Mac.title_bar_height(), 44);
+        // Standard CSS is unchanged (opaque, no blur).
+        assert!(!app.build_css().contains("backdrop-filter"));
+    }
+
+    #[test]
+    fn window_type_mac_opt_in() {
+        let mut app = App::new("Test", 800, 600);
+        app.set_window_type(WindowType::Mac);
+        assert_eq!(app.window_type(), WindowType::Mac);
+    }
+
+    #[test]
+    fn glass_strength_applies_alpha_and_blur() {
+        let mut app = App::new("Test", 800, 600);
+        app.set_glass_strength(crate::style::GlassStrength::BALANCED);
+        assert_eq!(app.window_alpha(), 0.85);
+        assert_eq!(app.window_blur(), 20.0);
+        assert!(app.build_css().contains("backdrop-filter: blur(20px)"));
+    }
+
+    #[test]
+    fn fullscreen_keys_toggle_and_exit() {
+        // F11 toggles in both modes, ESC only leaves fullscreen.
+        use gtk::gdk::Key;
+        assert_eq!(fullscreen_key_action(Key::F11, false), FullscreenKeyAction::Toggle);
+        assert_eq!(fullscreen_key_action(Key::F11, true), FullscreenKeyAction::Toggle);
+        assert_eq!(fullscreen_key_action(Key::Escape, true), FullscreenKeyAction::Exit);
+        assert_eq!(fullscreen_key_action(Key::Escape, false), FullscreenKeyAction::Ignored);
+        assert_eq!(fullscreen_key_action(Key::Return, true), FullscreenKeyAction::Ignored);
+        assert_eq!(fullscreen_key_action(Key::Return, false), FullscreenKeyAction::Ignored);
+    }
+
+    #[test]
+    fn fullscreen_reveal_strip() {
+        // The traffic lights show while the pointer touches the top edge.
+        assert!(fullscreen_reveal_lights(0.0));
+        assert!(fullscreen_reveal_lights(31.9));
+        assert!(!fullscreen_reveal_lights(32.0));
+        assert!(!fullscreen_reveal_lights(400.0));
     }
 }

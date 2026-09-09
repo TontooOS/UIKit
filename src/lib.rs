@@ -97,10 +97,10 @@ pub mod prelude {
     pub use crate::events::{Event, Action, Key, MouseButton};
 
     // Style
-    pub use crate::style::{Color, Font, FontWeight, Padding, Constraints, Size, Point, Rect, HAlignment, VAlignment, Alignment};
+    pub use crate::style::{Color, Font, FontWeight, Padding, Constraints, Size, Point, Rect, HAlignment, VAlignment, Alignment, FormFactor, GlassStrength, window_corner_radius_for, WINDOW_CORNER_RADIUS_DESKTOP, WINDOW_CORNER_RADIUS_LAPTOP};
 
     // App
-    pub use crate::app::{App, AppDelegate, ColorScheme};
+    pub use crate::app::{App, AppDelegate, ColorScheme, WindowType, TOOLKIT_ENV_VAR, TOOLKIT_ID, mark_toolkit};
 
     // Shaders
     pub use crate::shader::{Shader, Uniforms, ShaderError, VERTEX_FULLSCREEN, render_fullscreen};
