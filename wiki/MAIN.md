@@ -55,21 +55,25 @@ one square on each corner (`NorthWest`, `NorthEast`, `SouthWest`,
 strips.
 
 Each handle shows the matching resize cursor (`n-resize`, `se-resize`, ...).
-A press starts a `gtk::GestureDrag` whose behavior depends on the display
-backend:
+A press starts a `gtk::GestureDrag`. Exactly one backend owns the resize, so
+the window keeps its size after the button is released instead of snapping
+back:
 
 - **Native Wayland**: `gdk_toplevel_begin_resize` is called synchronously in
-  the press handler with surface-local press coordinates and the press device
-  (so GDK passes the matching implicit-grab serial). The compositor then runs
-  the whole resize with correct edge anchoring on all sides. This is the path
-  TontooCompositor serves.
-- **X11 / XWayland (WSLg)**: the same handoff is sent as a probe, because
-  WSLg's Weston silently drops `_NET_WM_MOVERESIZE` in many cases (known
-  WSLg issues 754/1008/1432). If drag updates keep arriving after 150 ms, the
-  handoff was dropped and the gesture resizes manually via
-  `set_default_size`; west/north edges additionally move the window through
-  X11 (`x11rb`, position-only configure) so the grabbed edge follows the
-  pointer where the environment allows repositioning.
+  the press handler with surface-local press coordinates (the handle-local
+  press point translated into the window) and the press device (so GDK passes
+  the matching implicit-grab serial). The compositor then runs the whole
+  resize with correct edge anchoring on all sides, and the manual fallback
+  stays off for the rest of the gesture. This is the path TontooCompositor
+  serves.
+- **X11 / XWayland (WSLg)**: the gesture resizes manually via
+  `set_default_size` in logical pixels (gesture deltas and default size share
+  the same unit, so no scale factor is applied); west/north edges
+  additionally move the window through X11 (`x11rb`, position-only configure)
+  by the size change that was actually applied after min-size clamping, so the
+  opposite edge stays anchored. No compositor handoff is sent, so no
+  window-manager session can revert the manual size on release. On release the
+  live allocation is committed once more as the default size.
 
 The handles are re-applied by `dispatch_custom` after every delegate rebuild,
 so resizing survives state updates. Set `UIKIT_RESIZE_DEBUG=1` to paint the
@@ -199,6 +203,9 @@ over time:
 
 ## Changelog
 
+- 2026-09-10: Window resize keeps its size on release (Wayland delegates
+  fully with surface-local coordinates, X11 resizes purely manually, drag end
+  commits the live allocation).
 - 2026-09-08: Toolkit identity (`TONTOO_TOOLKIT=UIKit` via `App::run` /
   `mark_toolkit`, `TOOLKIT_ENV_VAR` / `TOOLKIT_ID` in the prelude) so
   CoreWindows can classify UIKit windows.

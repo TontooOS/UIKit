@@ -764,13 +764,82 @@ mod x11_pos {
     }
 }
 
-/// An invisible strip along one window edge. Native Wayland hands the
-/// interactive resize to the compositor (`gdk_toplevel_begin_resize`), which
-/// anchors every edge correctly. Everywhere else (X11/XWayland/WSLg) the
-/// gesture resizes manually with `set_default_size` and — for west/north
-/// edges — moves the window through X11 so the grabbed edge follows the
-/// pointer instead of the opposite side growing. GestureDrag keeps tracking
-/// even when the pointer leaves the strip.
+/// Minimum window size applied to manual resizes.
+const RESIZE_MIN_W: i32 = 320;
+/// Minimum window height applied to manual resizes.
+const RESIZE_MIN_H: i32 = 240;
+
+/// Pure geometry for one manual resize step (X11 path): the gesture deltas
+/// (`dx`, `dy`, logical pixels from drag start) plus the size at drag start
+/// (`ow`, `oh`) yield the new default size and whether the window origin must
+/// move to keep the opposite edge anchored. Unit-testable without GTK.
+fn manual_resize_geometry(
+    edge: ResizeEdge,
+    ow: i32,
+    oh: i32,
+    dx: i32,
+    dy: i32,
+) -> (i32, i32, bool, bool) {
+    let mut nw = ow;
+    let mut nh = oh;
+    let mut move_x = false;
+    let mut move_y = false;
+    match edge {
+        ResizeEdge::East | ResizeEdge::NorthEast | ResizeEdge::SouthEast => nw = ow + dx,
+        ResizeEdge::West | ResizeEdge::NorthWest | ResizeEdge::SouthWest => {
+            nw = ow - dx;
+            move_x = true;
+        }
+        _ => {}
+    }
+    match edge {
+        ResizeEdge::South | ResizeEdge::SouthEast | ResizeEdge::SouthWest => nh = oh + dy,
+        ResizeEdge::North | ResizeEdge::NorthEast | ResizeEdge::NorthWest => {
+            nh = oh - dy;
+            move_y = true;
+        }
+        _ => {}
+    }
+    (nw.max(RESIZE_MIN_W), nh.max(RESIZE_MIN_H), move_x, move_y)
+}
+
+/// Repositioning for west/north drags: move by the size change that was
+/// actually applied (after min-size clamping) so the opposite edge stays
+/// anchored instead of drifting when the minimum size is hit. `scale`
+/// converts logical pixels to physical ones for the X11 root window.
+fn anchored_origin(
+    origin: (i32, i32),
+    start: (i32, i32),
+    current: (i32, i32),
+    move_x: bool,
+    move_y: bool,
+    scale: f64,
+) -> (i32, i32) {
+    let (ox, oy) = origin;
+    let nx = if move_x {
+        ox + ((start.0 - current.0) as f64 * scale).round() as i32
+    } else {
+        ox
+    };
+    let ny = if move_y {
+        oy + ((start.1 - current.1) as f64 * scale).round() as i32
+    } else {
+        oy
+    };
+    (nx, ny)
+}
+
+/// An invisible strip along one window edge. Exactly one backend owns the
+/// resize, never both at once: native Wayland delegates the whole interactive
+/// resize to the compositor (`gdk_toplevel_begin_resize`), which anchors every
+/// edge correctly. Everywhere else (X11/XWayland/WSLg) the gesture resizes
+/// manually with `set_default_size` and — for west/north edges — moves the
+/// window through X11 so the grabbed edge follows the pointer instead of the
+/// opposite side growing. Running both mechanisms at once makes the window
+/// snap back on button release (the compositor commits its own stale geometry
+/// over the manual size), so the manual fallback stays off while the
+/// compositor owns the drag. GestureDrag keeps tracking even when the pointer
+/// leaves the strip.
 fn resize_handle(edge: ResizeEdge) -> gtk::Widget {
     let area = gtk::DrawingArea::new();
     edge.apply_layout(&area);
@@ -780,23 +849,23 @@ fn resize_handle(edge: ResizeEdge) -> gtk::Widget {
     let start_size = std::rc::Rc::new(std::cell::Cell::new((0i32, 0i32)));
     let origin = std::rc::Rc::new(std::cell::Cell::new(None::<(i32, i32)>));
     let xid = std::rc::Rc::new(std::cell::Cell::new(None::<u32>));
-    /// None = manual-only (native Wayland delegates fully); Some(instant) =
-    /// X11 handoff sent, waiting to see whether the window manager accepted
-    /// it before falling back to manual resizing.
-    let mode = std::rc::Rc::new(std::cell::Cell::new(
-        None::<std::time::Instant>,
-    ));
+    /// True while the compositor owns the resize (native Wayland): the manual
+    /// `set_default_size` fallback must stay off so both mechanisms never
+    /// fight over the window size.
+    let delegated = std::rc::Rc::new(std::cell::Cell::new(false));
 
     let drag = gtk::GestureDrag::new();
     drag.set_button(1);
 
-    // Drag begin: record size, capture the X11 root origin once, and start
-    // the compositor handoff (immediately on Wayland, probe-style on X11).
+    // Drag begin: record size. Native Wayland delegates the whole resize to
+    // the compositor; X11 resizes purely manually (no `begin_resize` probe,
+    // whose window-manager session would otherwise revert the manual size on
+    // release).
     {
         let ss = start_size.clone();
         let origin = origin.clone();
         let xid_cell = xid.clone();
-        let mode = mode.clone();
+        let delegated = delegated.clone();
         let area_wk = area.downgrade();
         drag.connect_drag_begin(move |gesture, gx, gy| {
             let Some(a) = area_wk.upgrade() else { return };
@@ -804,18 +873,7 @@ fn resize_handle(edge: ResizeEdge) -> gtk::Widget {
             ss.set((win.width(), win.height()));
             origin.set(None);
             xid_cell.set(None);
-            mode.set(None);
-
-            let event = gesture.current_event();
-            let device = event
-                .as_ref()
-                .and_then(|e| e.device())
-                .or_else(|| {
-                    gtk::prelude::RootExt::display(&win)
-                        .default_seat()
-                        .and_then(|s| s.pointer())
-                });
-            let time = event.as_ref().map(|e| e.time()).unwrap_or(0);
+            delegated.set(false);
 
             let is_wayland = gtk::prelude::RootExt::display(&win)
                 .type_()
@@ -831,108 +889,100 @@ fn resize_handle(edge: ResizeEdge) -> gtk::Widget {
                 let Some(toplevel) = surface.dynamic_cast_ref::<gtk::gdk::Toplevel>() else {
                     return;
                 };
+                let event = gesture.current_event();
+                let device = event
+                    .as_ref()
+                    .and_then(|e| e.device())
+                    .or_else(|| {
+                        gtk::prelude::RootExt::display(&win)
+                            .default_seat()
+                            .and_then(|s| s.pointer())
+                    });
+                let time = event.as_ref().map(|e| e.time()).unwrap_or(0);
+                // The gesture reports handle-local coordinates (a few px
+                // inside a 6 px strip), but `begin_resize` needs surface-local
+                // ones. Translate into the window so the compositor anchors
+                // the correct edge (undecorated: window == surface).
+                let (sx, sy) = a
+                    .translate_coordinates(&win, gx, gy)
+                    .unwrap_or((gx, gy));
                 match device.as_ref() {
-                    Some(d) => toplevel.begin_resize(edge.gdk_edge(), Some(d), 1, gx, gy, time),
+                    Some(d) => toplevel.begin_resize(edge.gdk_edge(), Some(d), 1, sx, sy, time),
                     None => toplevel.begin_resize(
                         edge.gdk_edge(),
                         None::<&gtk::gdk::Device>,
                         1,
-                        gx,
-                        gy,
+                        sx,
+                        sy,
                         time,
                     ),
                 }
                 // Compositor owns the pointer grab now; no manual fallback.
+                delegated.set(true);
                 return;
             }
 
-            // X11 path: capture the current root origin for anchored manual
-            // moves, then probe the WM with a handoff request. WSLg's Weston
-            // silently drops many of these (focus/button races); if it does,
-            // drag_update below detects the silence and resizes manually.
+            // X11 path: capture the X window id and its current root origin
+            // once, so west/north drags can keep the grabbed edge anchored.
+            // No compositor handoff here: the gesture below owns the size.
             if let Some(x) = x11_pos::xid_of(&surface) {
                 xid_cell.set(Some(x));
                 origin.set(x11_pos::root_origin(x));
             }
-            if let Some(toplevel) = surface.dynamic_cast_ref::<gtk::gdk::Toplevel>() {
-                match device.as_ref() {
-                    Some(d) => toplevel.begin_resize(edge.gdk_edge(), Some(d), 1, gx, gy, time),
-                    None => toplevel.begin_resize(
-                        edge.gdk_edge(),
-                        None::<&gtk::gdk::Device>,
-                        1,
-                        gx,
-                        gy,
-                        time,
-                    ),
-                }
-                mode.set(Some(std::time::Instant::now()));
-            }
         });
     }
 
-    // Drag update: manual resize; west/north additionally reposition the
+    // Drag update: manual resize (X11 path only; skipped while the
+    // compositor owns the drag). West/north drags additionally reposition the
     // window so the grabbed edge tracks the pointer.
     {
         let ss = start_size.clone();
         let origin = origin.clone();
         let xid_cell = xid.clone();
-        let mode = mode.clone();
+        let delegated = delegated.clone();
         let area_wk = area.downgrade();
         drag.connect_drag_update(move |_, dx, dy| {
+            if delegated.get() {
+                return;
+            }
             let Some(a) = area_wk.upgrade() else { return };
             let Some(win) = a.root().and_then(|r| r.downcast::<gtk::Window>().ok()) else { return };
-
-            // While the WM might still accept the handoff, stay quiet: any
-            // event reaching this handler proves the pointer was NOT grabbed
-            // by the compositor, i.e. the handoff was dropped. After a short
-            // grace period, take over manually.
-            if let Some(t0) = mode.get() {
-                if t0.elapsed() < std::time::Duration::from_millis(150) {
-                    return;
-                }
-                mode.set(None);
-            }
 
             let (ow, oh) = ss.get();
             if ow == 0 && oh == 0 {
                 return;
             }
-            // Gesture deltas are in application pixels; the X11 root window
-            // works in physical pixels.
-            let scale = win.scale_factor() as f64;
-            let dx = (dx * scale).round() as i32;
-            let dy = (dy * scale).round() as i32;
-            let mut nw = ow;
-            let mut nh = oh;
-            let mut move_x = false;
-            let mut move_y = false;
-            match edge {
-                ResizeEdge::East | ResizeEdge::NorthEast | ResizeEdge::SouthEast => nw = ow + dx,
-                ResizeEdge::West | ResizeEdge::NorthWest | ResizeEdge::SouthWest => {
-                    nw = ow - dx;
-                    move_x = true;
-                }
-                _ => {}
-            }
-            match edge {
-                ResizeEdge::South | ResizeEdge::SouthEast | ResizeEdge::SouthWest => nh = oh + dy,
-                ResizeEdge::North | ResizeEdge::NorthEast | ResizeEdge::NorthWest => {
-                    nh = oh - dy;
-                    move_y = true;
-                }
-                _ => {}
-            }
-            let nw = nw.max(320);
-            let nh = nh.max(240);
+            // Gesture deltas and `set_default_size` are both in logical
+            // (application) pixels: no scale factor here. Only the X11 root
+            // window below works in physical pixels.
+            let dxl = dx.round() as i32;
+            let dyl = dy.round() as i32;
+            let (nw, nh, move_x, move_y) = manual_resize_geometry(edge, ow, oh, dxl, dyl);
             win.set_default_size(nw, nh);
 
             if move_x || move_y {
-                if let (Some((ox, oy)), Some(x)) = (origin.get(), xid_cell.get()) {
-                    let nx = if move_x { ox + dx } else { ox };
-                    let ny = if move_y { oy + dy } else { oy };
+                if let (Some(origin), Some(x)) = (origin.get(), xid_cell.get()) {
+                    let scale = win.scale_factor() as f64;
+                    let (nx, ny) =
+                        anchored_origin(origin, (ow, oh), (nw, nh), move_x, move_y, scale);
                     x11_pos::move_window(x, nx, ny);
                 }
+            }
+        });
+    }
+
+    // Drag end: commit the live allocation as the new default size so the
+    // window manager keeps it after the gesture is gone, then clear state.
+    {
+        let delegated = delegated.clone();
+        let area_wk = area.downgrade();
+        drag.connect_drag_end(move |_, _, _| {
+            delegated.set(false);
+            let Some(a) = area_wk.upgrade() else { return };
+            let Some(win) = a.root().and_then(|r| r.downcast::<gtk::Window>().ok()) else { return };
+            let (w, h) = (win.width(), win.height());
+            if w > 0 && h > 0 {
+                win.set_default_size(w, h);
             }
         });
     }
@@ -2081,5 +2131,74 @@ mod tests {
         assert!(fullscreen_reveal_lights(31.9));
         assert!(!fullscreen_reveal_lights(32.0));
         assert!(!fullscreen_reveal_lights(400.0));
+    }
+
+    #[test]
+    fn manual_resize_geometry_edges() {
+        // East grows to the right, no window move.
+        assert_eq!(
+            manual_resize_geometry(ResizeEdge::East, 800, 600, 50, 0),
+            (850, 600, false, false)
+        );
+        // South grows downward, no window move.
+        assert_eq!(
+            manual_resize_geometry(ResizeEdge::South, 800, 600, 0, 40),
+            (800, 640, false, false)
+        );
+        // West grows to the left and moves the window; height untouched.
+        assert_eq!(
+            manual_resize_geometry(ResizeEdge::West, 800, 600, -50, 99),
+            (850, 600, true, false)
+        );
+        // North grows upward and moves the window; width untouched.
+        assert_eq!(
+            manual_resize_geometry(ResizeEdge::North, 800, 600, 99, -30),
+            (800, 630, false, true)
+        );
+        // SouthEast grows in both directions without moving.
+        assert_eq!(
+            manual_resize_geometry(ResizeEdge::SouthEast, 800, 600, 10, 20),
+            (810, 620, false, false)
+        );
+        // NorthWest grows in both directions and moves in both axes.
+        assert_eq!(
+            manual_resize_geometry(ResizeEdge::NorthWest, 800, 600, -10, -20),
+            (810, 620, true, true)
+        );
+        // Shrinking past the minimum clamps instead of collapsing (east
+        // ignores the vertical delta, so the height is untouched).
+        assert_eq!(
+            manual_resize_geometry(ResizeEdge::East, 330, 250, -500, -500),
+            (320, 250, false, false)
+        );
+        assert_eq!(
+            manual_resize_geometry(ResizeEdge::SouthEast, 330, 250, -500, -500),
+            (320, 240, false, false)
+        );
+    }
+
+    #[test]
+    fn anchored_origin_keeps_opposite_edge() {
+        // West drag left by 50 logical px at scale 1: window moves left.
+        assert_eq!(
+            anchored_origin((100, 200), (800, 600), (850, 600), true, false, 1.0),
+            (50, 200)
+        );
+        // HiDPI scale 2 converts the logical move to physical pixels.
+        assert_eq!(
+            anchored_origin((100, 200), (800, 600), (850, 600), true, false, 2.0),
+            (0, 200)
+        );
+        // Clamped at the minimum: the window only moves by the size change
+        // that was actually applied, so the right edge stays anchored.
+        assert_eq!(
+            anchored_origin((100, 200), (330, 600), (320, 600), true, false, 1.0),
+            (110, 200)
+        );
+        // East/south drags never move the window.
+        assert_eq!(
+            anchored_origin((100, 200), (800, 600), (850, 640), false, false, 1.0),
+            (100, 200)
+        );
     }
 }
