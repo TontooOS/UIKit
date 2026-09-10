@@ -355,46 +355,68 @@ fn set_bar_lights_visible(bar: &gtk::Widget, visible: bool) {
 /// traffic lights hide (keeping layout space) until the pointer touches
 /// the top edge, and the minimize button is disabled (gray, no-op).
 fn apply_window_chrome(fullscreen: bool) {
+    // Snapshot everything under a short shared borrow, then build with no
+    // borrow held: build_window_content takes borrow_mut() itself (to write
+    // back the effective bar visibility), so holding any borrow across it
+    // panics with "RefCell already borrowed" (e.g. on traffic-light clicks
+    // via dispatch_custom).
+    struct ChromePlan {
+        view: Box<dyn Widget>,
+        show_bar: bool,
+        scroll_content: bool,
+        title: String,
+        window_type: WindowType,
+        bar_config: TitleBarConfig,
+        resizable: bool,
+        window: Option<gtk::ApplicationWindow>,
+    }
+    let plan: Option<ChromePlan> = APP_STATE.with(|state| {
+        state.borrow().as_ref().map(|app| ChromePlan {
+            view: app.delegate.view(),
+            show_bar: app.show_window_bar,
+            scroll_content: app.scroll_content,
+            title: app.title.clone(),
+            window_type: app.window_type,
+            bar_config: TitleBarConfig {
+                custom: app.titlebar_widget.clone(),
+                show_title: app.titlebar_show_title,
+                minimize_enabled: !fullscreen,
+            },
+            resizable: app.resizable,
+            window: app.window.clone(),
+        })
+    });
+    let Some(plan) = plan else {
+        return;
+    };
+    let (mut content, _, bar) = build_window_content(
+        plan.view,
+        plan.show_bar,
+        plan.scroll_content,
+        &plan.title,
+        plan.window_type,
+        plan.bar_config,
+    );
+    if plan.resizable && !fullscreen {
+        content = wrap_window_with_resize_edges(content);
+    }
+    content.set_hexpand(true);
+    content.set_vexpand(true);
+    content.set_visible(true);
+    if let Some(ref bar) = bar {
+        bar.set_hexpand(true);
+        bar.set_visible(true);
+        set_bar_lights_visible(bar, !fullscreen);
+    }
     APP_STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        let app = match state.as_mut() {
-            Some(app) => app,
-            None => return,
-        };
-        let window = match app.window.clone() {
-            Some(window) => window,
-            None => return,
-        };
-        let view = app.delegate.view();
-        let title = app.title.clone();
-        let bar_config = TitleBarConfig {
-            custom: app.titlebar_widget.clone(),
-            show_title: app.titlebar_show_title,
-            minimize_enabled: !fullscreen,
-        };
-        let (mut content, _, bar) = build_window_content(
-            view,
-            app.show_window_bar,
-            app.scroll_content,
-            &title,
-            app.window_type,
-            bar_config,
-        );
-        if app.resizable && !fullscreen {
-            content = wrap_window_with_resize_edges(content);
+        if let Some(app) = state.borrow_mut().as_mut() {
+            app.titlebar = bar;
         }
-        content.set_hexpand(true);
-        content.set_vexpand(true);
-        content.set_visible(true);
-        if let Some(ref bar) = bar {
-            bar.set_hexpand(true);
-            bar.set_visible(true);
-            set_bar_lights_visible(bar, !fullscreen);
-        }
-        app.titlebar = bar;
+    });
+    if let Some(window) = plan.window {
         window.set_child(Some(&content));
         window.queue_draw();
-    });
+    }
 }
 
 /// Build the window content column: an optional traffic-light bar on top
@@ -1925,6 +1947,44 @@ mod tests {
         app.force_window_bar();
         assert!(app.force_window_bar);
         assert!(app.show_window_bar);
+    }
+
+    #[test]
+    fn apply_window_chrome_rebuilds_without_borrow_panic() {
+        // Regression test: apply_window_chrome used to hold borrow_mut()
+        // across build_window_content (which borrows mutably itself),
+        // aborting on every traffic-light click with
+        // "RefCell already borrowed".
+        if gtk::init().is_err() {
+            eprintln!("skipping: no display");
+            return;
+        }
+        // A real window is required: with window None the chrome function
+        // returns before reaching the nested borrow in build_window_content.
+        let gtk_app = gtk::Application::new(
+            Some("org.tontoo.uikit.borrowtest"),
+            Default::default(),
+        );
+        let window = gtk::ApplicationWindow::new(&gtk_app);
+        APP_STATE.with(|state| {
+            *state.borrow_mut() = Some(AppState {
+                delegate: Box::new(NoDelegate),
+                window: Some(window),
+                show_window_bar: true,
+                force_window_bar: false,
+                resizable: true,
+                scroll_content: true,
+                title: "Test".into(),
+                window_type: WindowType::Standard,
+                titlebar: None,
+                titlebar_widget: None,
+                titlebar_show_title: true,
+            });
+        });
+        apply_window_chrome(false);
+        APP_STATE.with(|state| {
+            *state.borrow_mut() = None;
+        });
     }
 
     #[test]

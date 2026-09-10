@@ -203,6 +203,11 @@ over time:
 
 ## Changelog
 
+- 2026-09-10: Fixed `RefCell already borrowed` abort on traffic-light
+  clicks. `apply_window_chrome` snapshots state under a short shared
+  borrow and builds with no borrow held (`build_window_content` borrows
+  mutably itself). Covered by
+  `app::tests::apply_window_chrome_rebuilds_without_borrow_panic`.
 - 2026-09-10: Window resize keeps its size on release (Wayland delegates
   fully with surface-local coordinates, X11 resizes purely manually, drag end
   commits the live allocation).
