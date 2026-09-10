@@ -231,40 +231,49 @@ thread_local! {
 
 /// Called by buttons when a custom action fires.
 pub fn dispatch_custom(action_name: &str) {
-    APP_STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        if let Some(ref mut app) = *state {
-            // Handle built-in window actions
-            match action_name {
-                "__close" => {
-                    if let Some(ref window) = app.window {
-                        window.close();
-                    }
-                    return;
-                }
-                "__minimize" => {
-                    if let Some(ref window) = app.window {
-                        window.minimize();
-                    }
-                    return;
-                }
-                "__maximize" => {
-                    if let Some(ref window) = app.window {
-                        if window.is_fullscreen() {
-                            window.unfullscreen();
-                        } else {
-                            window.fullscreen();
-                        }
-                    }
-                    return;
-                }
-                _ => {}
-            }
-
-            // Delegate custom actions
-            app.delegate.handle_custom(action_name);
-        }
+    // Snapshot the window and action under a short shared borrow, then act
+    // with no borrow held: window methods (close/minimize/fullscreen) run
+    // GTK destroy/notify handlers synchronously, and those re-enter
+    // APP_STATE with borrow_mut() (e.g. build_window_content). Holding a
+    // borrow across the window call panics with "RefCell already borrowed".
+    let snapshot: Option<(Option<gtk::ApplicationWindow>, String)> = APP_STATE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .map(|app| (app.window.clone(), action_name.to_string()))
     });
+    let Some((window, action)) = snapshot else {
+        return;
+    };
+    match action.as_str() {
+        "__close" => {
+            if let Some(window) = window {
+                window.close();
+            }
+        }
+        "__minimize" => {
+            if let Some(window) = window {
+                window.minimize();
+            }
+        }
+        "__maximize" => {
+            if let Some(window) = window {
+                if window.is_fullscreen() {
+                    window.unfullscreen();
+                } else {
+                    window.fullscreen();
+                }
+            }
+        }
+        custom => {
+            // Delegate custom actions (fresh borrow, no window call inside).
+            APP_STATE.with(|state| {
+                if let Some(ref mut app) = *state.borrow_mut() {
+                    app.delegate.handle_custom(custom);
+                }
+            });
+        }
+    }
     // Rebuild content for the current mode (windowed or fullscreen).
     let fullscreen = APP_STATE.with(|state| {
         state
