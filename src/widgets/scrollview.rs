@@ -102,6 +102,7 @@ impl ViewContent for ScrollView {
         } else {
             gtk::PolicyType::Never
         });
+        crate::smooth_scroll::apply_smooth_scrolling(&scrolled);
 
         if let Some(ref content) = self.content {
             let child_widget = content.to_gtk();
@@ -151,6 +152,7 @@ impl Widget for ScrollView {
         } else {
             gtk::PolicyType::Never
         });
+        crate::smooth_scroll::apply_smooth_scrolling(&scrolled);
 
         if let Some(ref content) = self.content {
             let child_widget = content.to_gtk();

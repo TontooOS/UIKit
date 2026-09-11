@@ -159,6 +159,7 @@ impl ViewContent for ListView {
         scrolled.set_child(Some(&container));
         scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
         scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
+        crate::smooth_scroll::apply_smooth_scrolling(&scrolled);
 
         if frame.width > 0.0 {
             scrolled.set_width_request(frame.width as i32);
@@ -248,6 +249,7 @@ impl Widget for ListView {
         scrolled.set_child(Some(&container));
         scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
         scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
+        crate::smooth_scroll::apply_smooth_scrolling(&scrolled);
 
         scrolled.upcast()
     }

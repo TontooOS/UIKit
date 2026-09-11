@@ -154,6 +154,35 @@ let list = ListView::new()
 let view = View::new(list).with_frame(0.0, 0.0, 400.0, 600.0);
 ```
 
+## Smooth Scrolling
+
+Every UIKit scroll container (`ScrollView`, `ListView`, the `App` scroll
+wrapper) uses smooth scrolling via `uikit::smooth_scroll`:
+
+- Discrete mouse-wheel ticks animate to their target with an ease-out-cubic
+  frame animation (`SCROLL_DURATION`, 200 ms) instead of jumping one step
+  instantly. Rapid ticks retarget the running animation, so fast spins travel
+  further but stay fluid.
+- Touchpad (smooth/pixel) deltas apply 1:1 to preserve the native smooth
+  feel; the animation target follows along so mixed input never fights.
+- Kinetic touch scrolling and overlay scrollbars are enabled on every
+  container.
+
+```rust
+let scrolled = gtk::ScrolledWindow::new();
+uikit::smooth_scroll::apply_smooth_scrolling(&scrolled);
+```
+
+| Item | Description |
+|---|---|
+| `apply_smooth_scrolling(scrolled)` | Enable smooth scrolling on any `gtk::ScrolledWindow` |
+| `WHEEL_STEP_PX` | Pixels per wheel tick (`64.0`, bounded by `MIN_STEP_PX` / `MAX_STEP_PX`) |
+| `SCROLL_DURATION` | Settle animation length (`200 ms`) |
+| `clamp_target(value, lower, upper, page_size)` | Clamp a target into the scrollable range |
+| `ease_out_cubic(t)` | Easing curve used by the animation |
+| `animated_value(from, to, elapsed)` | Interpolated value for the tick callback |
+| `wheel_step(step_increment)` | Pixel travel for one tick from an adjustment step |
+
 ## TrafficLights
 
 macOS-style window controls (close, minimize, maximize). Automatically added by `App` as window chrome.

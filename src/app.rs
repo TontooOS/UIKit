@@ -536,6 +536,7 @@ fn wrap_scrollable(content: gtk::Widget) -> gtk::Widget {
     scrolled.set_child(Some(&content));
     scrolled.set_hexpand(true);
     scrolled.set_vexpand(true);
+    crate::smooth_scroll::apply_smooth_scrolling(&scrolled);
     scrolled.upcast()
 }
 

@@ -144,6 +144,7 @@ impl AppDelegate for NotesApp {
         scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
         scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
         scrolled.set_kinetic_scrolling(true);
+        uikit::smooth_scroll::apply_smooth_scrolling(&scrolled);
         let child = root.to_gtk_scrollable();
         child.set_hexpand(true);
         child.set_vexpand(true);
