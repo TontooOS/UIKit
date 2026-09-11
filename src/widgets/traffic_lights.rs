@@ -9,6 +9,31 @@ use gtk::prelude::*;
 use gtk::{self, Box as GtkBox, Button as GtkButton, Image, Label, Orientation};
 use std::rc::Rc;
 
+/// Resolve a window-control icon at runtime.
+///
+/// Priority: `$UIKIT_ASSETS_DIR` override, LiveOS sidecar
+/// (`/Library/System/uikit.resources/assets/`), staged sources
+/// (`/Library/System/uikit/assets/`), then the crate dir (dev / `cargo run`).
+/// Falls back to the LiveOS sidecar path when nothing exists so a missing
+/// staging is obvious instead of a stale build path.
+fn asset_path(file: &str) -> String {
+    let mut candidates = Vec::new();
+    if let Ok(env) = std::env::var("UIKIT_ASSETS_DIR") {
+        if !env.is_empty() {
+            candidates.push(format!("{}/{}", env.trim_end_matches('/'), file));
+        }
+    }
+    candidates.push(format!("/Library/System/uikit.resources/assets/{}", file));
+    candidates.push(format!("/Library/System/uikit/assets/{}", file));
+    candidates.push(format!("{}/assets/{}", env!("CARGO_MANIFEST_DIR"), file));
+    for c in &candidates {
+        if std::path::Path::new(c).exists() {
+            return c.clone();
+        }
+    }
+    candidates.into_iter().next().unwrap_or_else(|| file.to_string())
+}
+
 pub struct TrafficLights {
     id: WidgetId,
     x: f32,
@@ -214,10 +239,9 @@ impl Widget for TrafficLights {
         // No top margin: vertical centering is handled by valign so the
         // lights sit exactly centered next to the title label.
 
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let close_path = format!("{}/assets/close.png", manifest_dir);
-        let minimize_path = format!("{}/assets/minimize.png", manifest_dir);
-        let maximize_path = format!("{}/assets/maximize.png", manifest_dir);
+        let close_path = asset_path("close.png");
+        let minimize_path = asset_path("minimize.png");
+        let maximize_path = asset_path("maximize.png");
 
         let (close_btn, close_icon) = self.build_button(&close_path, Color::from_rgb(255, 95, 86), || {
             crate::app::dispatch_custom("__close");

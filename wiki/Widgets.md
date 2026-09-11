@@ -211,6 +211,11 @@ The traffic lights always stay reserved on the left. A custom widget fills
 the bar from after the lights to the right edge and lays out its own
 alignment; the title only renders when no custom widget is set.
 
+The `close.png`, `minimize.png` and `maximize.png` icons are resolved at
+runtime via `asset_path`: `$UIKIT_ASSETS_DIR` override first, then the
+LiveOS sidecar (`/Library/System/uikit.resources/assets/`), staged sources
+(`/Library/System/uikit/assets/`), then the crate `assets/` dir.
+
 Apps use the bar without building it manually:
 
 ```rust
