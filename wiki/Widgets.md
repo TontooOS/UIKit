@@ -165,6 +165,8 @@ wrapper) uses smooth scrolling via `uikit::smooth_scroll`:
   further but stay fluid.
 - Touchpad (smooth/pixel) deltas apply 1:1 to preserve the native smooth
   feel; the animation target follows along so mixed input never fights.
+- Events at the scroll limits bubble (`Proceed`) so nested scroll views
+  chain correctly instead of swallowing outer scrolling.
 - Kinetic touch scrolling and overlay scrollbars are enabled on every
   container.
 

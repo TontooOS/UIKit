@@ -83,6 +83,14 @@ pub fn wheel_step(step_increment: f64) -> f64 {
     }
 }
 
+/// Whether scrolling `delta` pixels from `current` is blocked because the
+/// adjustment is already at its limit (or the delta is zero). Blocked events
+/// must bubble to parent scrollers so nested scroll views chain correctly.
+/// Pure for tests.
+pub fn scroll_direction_blocked(delta: f64, current: f64, lower: f64, upper: f64) -> bool {
+    delta == 0.0 || (delta > 0.0 && current >= upper) || (delta < 0.0 && current <= lower)
+}
+
 /// Enable smooth animated scrolling on a `ScrolledWindow`.
 ///
 /// Installs a capture-phase scroll controller that animates discrete wheel
@@ -111,11 +119,21 @@ pub fn apply_smooth_scrolling(scrolled: &gtk::ScrolledWindow) {
         }
         let vadj = scrolled.vadjustment();
         let hadj = scrolled.hadjustment();
+        let v_lower = vadj.lower();
+        let v_upper = (vadj.upper() - vadj.page_size()).max(v_lower);
+        let h_lower = hadj.lower();
+        let h_upper = (hadj.upper() - hadj.page_size()).max(h_lower);
 
         if matches!(controller.unit(), gtk::gdk::ScrollUnit::Surface) {
             // Touchpad: apply pixel deltas directly (native smooth feel) and
             // keep the animation target in sync so a running wheel animation
-            // does not yank the content back.
+            // does not yank the content back. At the limits the event bubbles
+            // so outer scroll views keep chaining.
+            if scroll_direction_blocked(dy, vadj.value(), v_lower, v_upper)
+                && scroll_direction_blocked(dx, hadj.value(), h_lower, h_upper)
+            {
+                return glib::Propagation::Proceed;
+            }
             let v = clamp_target(vadj.value() + dy, vadj.lower(), vadj.upper(), vadj.page_size());
             let h = clamp_target(hadj.value() + dx, hadj.lower(), hadj.upper(), hadj.page_size());
             vadj.set_value(v);
@@ -128,9 +146,15 @@ pub fn apply_smooth_scrolling(scrolled: &gtk::ScrolledWindow) {
             return glib::Propagation::Stop;
         }
 
-        // Mouse wheel: expand discrete steps to pixels and animate.
+        // Mouse wheel: expand discrete steps to pixels and animate. At the
+        // limits the event bubbles so outer scroll views keep chaining.
         let dy_px = dy * wheel_step(vadj.step_increment());
         let dx_px = dx * wheel_step(hadj.step_increment());
+        if scroll_direction_blocked(dy_px, vadj.value(), v_lower, v_upper)
+            && scroll_direction_blocked(dx_px, hadj.value(), h_lower, h_upper)
+        {
+            return glib::Propagation::Proceed;
+        }
         {
             let mut s = state.borrow_mut();
             if !s.running {
@@ -227,6 +251,18 @@ mod tests {
         );
         let mid = animated_value(0.0, 100.0, Duration::from_millis(100));
         assert!(mid > 50.0 && mid < 100.0);
+    }
+
+    #[test]
+    fn direction_blocked_at_limits() {
+        assert!(scroll_direction_blocked(0.0, 50.0, 0.0, 100.0));
+        assert!(scroll_direction_blocked(10.0, 100.0, 0.0, 100.0));
+        assert!(scroll_direction_blocked(-10.0, 0.0, 0.0, 100.0));
+        assert!(!scroll_direction_blocked(10.0, 50.0, 0.0, 100.0));
+        assert!(!scroll_direction_blocked(-10.0, 50.0, 0.0, 100.0));
+        // Collapsed range (content fits): every direction is blocked.
+        assert!(scroll_direction_blocked(10.0, 0.0, 0.0, 0.0));
+        assert!(scroll_direction_blocked(-10.0, 0.0, 0.0, 0.0));
     }
 
     #[test]

@@ -205,8 +205,9 @@ over time:
 
 - 2026-09-11: Smooth scrolling in every scroll container (`ScrollView`,
   `ListView`, `App` scroll wrapper). A capture-phase scroll controller
-  animates discrete wheel ticks with an ease-out-cubic settle instead of
-  jumping one step instantly; touchpad deltas pass through 1:1. See
+  animates discrete   wheel ticks with an ease-out-cubic settle instead of
+  jumping one step instantly; touchpad deltas pass through 1:1, limit events
+  bubble for nested chaining. See
   [Widgets.md](Widgets.md) (`Smooth Scrolling`).
 - 2026-09-10: Fixed `RefCell already borrowed` abort on traffic-light
   clicks. `apply_window_chrome` snapshots state under a short shared

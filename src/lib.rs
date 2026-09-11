@@ -105,7 +105,8 @@ pub mod prelude {
 
     // Smooth scrolling
     pub use crate::smooth_scroll::{
-        apply_smooth_scrolling, animated_value, clamp_target, ease_out_cubic, wheel_step,
+        apply_smooth_scrolling, animated_value, clamp_target, ease_out_cubic,
+        scroll_direction_blocked, wheel_step,
         MAX_STEP_PX, MIN_STEP_PX, SCROLL_DURATION, WHEEL_STEP_PX,
     };
 
