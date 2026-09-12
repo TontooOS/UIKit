@@ -205,6 +205,10 @@ over time:
 
 ## Changelog
 
+- 2026-09-12: Scroll edge effects removed: no overshoot glow at the scroll
+  limits and no undershoot shadow on scrollable edges (`ScrollView`,
+  `ListView`, `App` scroll wrapper). See [Widgets.md](Widgets.md)
+  (`Smooth Scrolling`).
 - 2026-09-12: Cursor theme sync (`Cursor.md`): every app points GTK and the
   Xcursor environment at the MacTahoe pack (`MacTahoe-dark-cursors` /
   `MacTahoe-cursors`) at `24` px, so hover and resize cursors keep the same

@@ -169,6 +169,9 @@ wrapper) uses smooth scrolling via `uikit::smooth_scroll`:
   chain correctly instead of swallowing outer scrolling.
 - Kinetic touch scrolling and overlay scrollbars are enabled on every
   container.
+- Edge effects are disabled on every container: no rubber-band glow
+  (`overshoot`) at the scroll limits and no edge shadow (`undershoot`) along
+  scrollable edges, so lists scroll cleanly like macOS/iOS.
 
 ```rust
 let scrolled = gtk::ScrolledWindow::new();
@@ -178,6 +181,8 @@ uikit::smooth_scroll::apply_smooth_scrolling(&scrolled);
 | Item | Description |
 |---|---|
 | `apply_smooth_scrolling(scrolled)` | Enable smooth scrolling on any `gtk::ScrolledWindow` |
+| `disable_edge_effects(scrolled)` | Remove overshoot/undershoot edge effects on any `gtk::ScrolledWindow` |
+| `NO_EDGE_EFFECT_CSS` | CSS snippet clearing all `overshoot` / `undershoot` sides |
 | `WHEEL_STEP_PX` | Pixels per wheel tick (`64.0`, bounded by `MIN_STEP_PX` / `MAX_STEP_PX`) |
 | `SCROLL_DURATION` | Settle animation length (`200 ms`) |
 | `clamp_target(value, lower, upper, page_size)` | Clamp a target into the scrollable range |

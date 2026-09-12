@@ -1558,6 +1558,20 @@ impl App {
             scrollbar slider:active {{
                 background: rgba(255, 255, 255, 0.5);
             }}
+            scrolledwindow overshoot.top,
+            scrolledwindow overshoot.bottom,
+            scrolledwindow overshoot.left,
+            scrolledwindow overshoot.right,
+            scrolledwindow undershoot.top,
+            scrolledwindow undershoot.bottom,
+            scrolledwindow undershoot.left,
+            scrolledwindow undershoot.right {{
+                background-image: none;
+                background-color: transparent;
+                border-style: none;
+                border-width: 0;
+                box-shadow: none;
+            }}
             scrolledwindow {{
                 background: transparent;
                 border-radius: {window_radius:.0}px;
@@ -1959,6 +1973,24 @@ mod tests {
             "MacTahoe-cursors"
         );
         assert_eq!(CURSOR_SIZE, 24);
+    }
+
+    #[test]
+    fn app_css_disables_scroll_edge_effects() {
+        // No overshoot glow at the limits, no undershoot shadow on edges.
+        let css = App::new("Test", 800, 600).build_css();
+        for node in [
+            "scrolledwindow overshoot.top",
+            "scrolledwindow overshoot.bottom",
+            "scrolledwindow overshoot.left",
+            "scrolledwindow overshoot.right",
+            "scrolledwindow undershoot.top",
+            "scrolledwindow undershoot.bottom",
+            "scrolledwindow undershoot.left",
+            "scrolledwindow undershoot.right",
+        ] {
+            assert!(css.contains(node), "missing {node}");
+        }
     }
 
     #[test]

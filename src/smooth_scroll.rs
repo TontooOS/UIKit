@@ -19,6 +19,9 @@
 //!   timers, so fast spins travel further but stay fluid.
 //! - Kinetic touch scrolling and overlay scrollbars are enabled on every
 //!   window this helper is applied to.
+//! - Edge effects are disabled on every window this helper is applied to: no
+//!   rubber-band glow (`overshoot`) at the scroll limits and no edge shadow
+//!   (`undershoot`) along scrollable edges.
 //!
 //! Apply with [`apply_smooth_scrolling`] on every `ScrolledWindow` the toolkit
 //! creates (`ScrollView`, `ListView`, `App` scroll wrapper).
@@ -36,6 +39,41 @@ pub const MIN_STEP_PX: f64 = 24.0;
 pub const MAX_STEP_PX: f64 = 120.0;
 /// Duration of the settle animation per scroll burst.
 pub const SCROLL_DURATION: Duration = Duration::from_millis(200);
+
+/// CSS that removes the edge effects GTK draws on scroll containers: the
+/// rubber-band glow at the scroll limits (`overshoot`) and the edge shadow
+/// along scrollable edges (`undershoot`). TontooOS lists scroll cleanly like
+/// macOS/iOS with no flash or shadow artifact when a limit is reached.
+///
+/// Applied scoped to one `ScrolledWindow` via [`disable_edge_effects`], so
+/// the bare node selectors below match its `overshoot` / `undershoot` child
+/// nodes. The same rules are also part of the global `App` CSS (scoped with
+/// a `scrolledwindow` prefix) as a fallback.
+pub const NO_EDGE_EFFECT_CSS: &str = "
+overshoot.top, overshoot.bottom, overshoot.left, overshoot.right {
+    background-image: none;
+    background-color: transparent;
+    border-style: none;
+    border-width: 0;
+    box-shadow: none;
+}
+undershoot.top, undershoot.bottom, undershoot.left, undershoot.right {
+    background-image: none;
+    background-color: transparent;
+    border-style: none;
+    border-width: 0;
+    box-shadow: none;
+}
+";
+
+/// Remove the overshoot/undershoot edge effects on a `ScrolledWindow`.
+///
+/// Scoped to the given window (provider attached to its own style context,
+/// cascading to the edge-effect child nodes), so other GTK apps are
+/// unaffected. Safe to call on any `ScrolledWindow`, even without `App`.
+pub fn disable_edge_effects(scrolled: &gtk::ScrolledWindow) {
+    crate::widget::apply_css(scrolled, NO_EDGE_EFFECT_CSS);
+}
 
 /// Animation state shared between the scroll handler and the tick callback.
 #[derive(Debug, Default)]
@@ -95,10 +133,12 @@ pub fn scroll_direction_blocked(delta: f64, current: f64, lower: f64, upper: f64
 ///
 /// Installs a capture-phase scroll controller that animates discrete wheel
 /// ticks and passes touchpad pixel deltas through 1:1. Safe to call on any
-/// `ScrolledWindow`; also enables kinetic and overlay scrolling.
+/// `ScrolledWindow`; also enables kinetic and overlay scrolling and removes
+/// the overshoot/undershoot edge effects.
 pub fn apply_smooth_scrolling(scrolled: &gtk::ScrolledWindow) {
     scrolled.set_kinetic_scrolling(true);
     scrolled.set_overlay_scrolling(true);
+    disable_edge_effects(scrolled);
 
     let state = Rc::new(RefCell::new(ScrollAnim::default()));
     let controller = gtk::EventControllerScroll::new(
@@ -272,5 +312,23 @@ mod tests {
         assert_eq!(wheel_step(5.0), MIN_STEP_PX);
         assert_eq!(wheel_step(500.0), MAX_STEP_PX);
         assert_eq!(wheel_step(48.0), 48.0);
+    }
+
+    #[test]
+    fn edge_effect_css_covers_all_sides() {
+        for node in [
+            "overshoot.top",
+            "overshoot.bottom",
+            "overshoot.left",
+            "overshoot.right",
+            "undershoot.top",
+            "undershoot.bottom",
+            "undershoot.left",
+            "undershoot.right",
+        ] {
+            assert!(NO_EDGE_EFFECT_CSS.contains(node), "missing {node}");
+        }
+        assert!(NO_EDGE_EFFECT_CSS.contains("background-image: none"));
+        assert!(NO_EDGE_EFFECT_CSS.contains("box-shadow: none"));
     }
 }
