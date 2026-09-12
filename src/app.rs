@@ -166,6 +166,78 @@ impl ColorScheme {
     }
 }
 
+/// Fixed TontooOS cursor size in px.
+///
+/// Matches the compositor (`XCURSOR_SIZE` in `compositor/src/config.rs`) and
+/// BaseOS (`etc/X11/Xresources.d/50-baseos-cursors`,
+/// `etc/profile.d/baseos-cursors.sh`) so app cursors render at the same size
+/// as the compositor cursor.
+pub const CURSOR_SIZE: i32 = 24;
+
+/// Cursor theme name for a color scheme.
+///
+/// Matches the compositor pack names (`MacTahoe-dark-cursors` /
+/// `MacTahoe-cursors`), so every named cursor resolves from the same pack.
+pub fn cursor_theme_for_scheme(scheme: ColorScheme) -> &'static str {
+    match scheme {
+        ColorScheme::Dark => "MacTahoe-dark-cursors",
+        ColorScheme::Light => "MacTahoe-cursors",
+    }
+}
+
+/// Point GTK and the Xcursor environment at the scheme cursor theme.
+///
+/// Named cursors requested by the app (`default` on the window, `n-resize`
+/// and friends on the resize handles, `text` in entries, ...) otherwise
+/// resolve from whatever fallback theme GTK happens to find (Adwaita,
+/// breeze, ...), which renders at a different size and color than the
+/// compositor cursor. Setting `gtk-cursor-theme-name` /
+/// `gtk-cursor-theme-size` plus defaulting `XCURSOR_THEME` / `XCURSOR_SIZE`
+/// keeps every cursor in the MacTahoe pack at [`CURSOR_SIZE`] px.
+///
+/// A foreign `XCURSOR_THEME` override chosen by the user is left untouched;
+/// only a missing value or a stale MacTahoe value is updated. Safe to call
+/// before `gtk::init` (only the environment part runs then) and after (both
+/// parts run). Called automatically by [`App::run`]; call it manually when
+/// driving GTK without `App` (custom event loops).
+///
+/// ```no_run
+/// use uikit::app::{ColorScheme, apply_cursor_theme};
+///
+/// apply_cursor_theme(ColorScheme::Dark);
+/// ```
+pub fn apply_cursor_theme(scheme: ColorScheme) {
+    let theme = cursor_theme_for_scheme(scheme);
+    // Only manage the environment while it is unset or already points at a
+    // MacTahoe variant; a foreign user override stays untouched.
+    let managed = match std::env::var("XCURSOR_THEME") {
+        Err(_) => true,
+        Ok(cur) => cur.is_empty() || cur == theme || cur.starts_with("MacTahoe"),
+    };
+    if managed {
+        // SAFETY: same contract as `mark_toolkit` — called on the main
+        // thread during startup/activation with no concurrent access.
+        unsafe {
+            std::env::set_var("XCURSOR_THEME", theme);
+            std::env::set_var("XCURSOR_SIZE", CURSOR_SIZE.to_string());
+        }
+    }
+    if gtk::is_initialized() {
+        if let Some(settings) = gtk::Settings::default() {
+            glib::object::ObjectExt::set_property(
+                &settings,
+                "gtk-cursor-theme-name",
+                theme,
+            );
+            glib::object::ObjectExt::set_property(
+                &settings,
+                "gtk-cursor-theme-size",
+                CURSOR_SIZE,
+            );
+        }
+    }
+}
+
 /// Window chrome type.
 ///
 /// - `Standard` (default): current UIKit window — slim traffic-light bar,
@@ -1538,6 +1610,8 @@ impl App {
                 CURRENT_SCHEME.store(scheme_to_u8(new_scheme), Ordering::Relaxed);
                 let new_css = Self::css_for_scheme(new_scheme, glass, window_radius, window_alpha, window_blur, window_frame);
                 provider.load_from_string(&new_css);
+                // Keep the cursor pack in sync across dark/light switches.
+                apply_cursor_theme(new_scheme);
                 // Force redraw of all windows so scrolledwindow/viewport pick up new bg immediately
                 if let Some(display) = gtk::gdk::Display::default() {
                     for i in 0..display.monitors().n_items() {
@@ -1594,6 +1668,9 @@ impl App {
             self.color_scheme = ColorScheme::detect_system();
         }
         CURRENT_SCHEME.store(scheme_to_u8(self.color_scheme), Ordering::Relaxed);
+        // Sync the cursor pack before GTK starts so every named cursor
+        // resolves from the MacTahoe theme at 24 px (see `apply_cursor_theme`).
+        apply_cursor_theme(self.color_scheme);
 
         let app = Application::builder()
             .application_id("org.tontoo.uikit")
@@ -1601,6 +1678,7 @@ impl App {
             .build();
 
         let title = self.title.clone();
+        let cursor_scheme = self.color_scheme;
         let width = self.width;
         let height = self.height;
         let force_size = self.force_size;
@@ -1659,6 +1737,11 @@ impl App {
                 &css_provider,
                 gtk::STYLE_PROVIDER_PRIORITY_APPLICATION as u32,
             );
+            // Re-apply the cursor theme now that GTK is up, so named cursors
+            // resolve from the MacTahoe pack even when the environment was
+            // already set (e.g. inherited from the compositor or a login
+            // shell with a stale value).
+            apply_cursor_theme(cursor_scheme);
 
             // Build widget tree AFTER GTK is initialized.
             let initial_view = if has_delegate {
@@ -1861,6 +1944,21 @@ mod tests {
         assert_eq!(app.color_scheme(), ColorScheme::Dark);
         app.set_color_scheme(ColorScheme::Light);
         assert_eq!(app.color_scheme(), ColorScheme::Light);
+    }
+
+    #[test]
+    fn cursor_theme_matches_compositor_pack() {
+        // Same names and size as the compositor (config.rs) and BaseOS
+        // (50-baseos-cursors / baseos-cursors.sh).
+        assert_eq!(
+            cursor_theme_for_scheme(ColorScheme::Dark),
+            "MacTahoe-dark-cursors"
+        );
+        assert_eq!(
+            cursor_theme_for_scheme(ColorScheme::Light),
+            "MacTahoe-cursors"
+        );
+        assert_eq!(CURSOR_SIZE, 24);
     }
 
     #[test]

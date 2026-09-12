@@ -18,6 +18,7 @@ TontooUIKit is a native Rust UI toolkit for TontooOS, built on GTK4. It follows 
 | Shader | [Shader.md](Shader.md) | GLSL shader loading, built-in effects, ShaderView |
 | ViewController | [ViewController.md](ViewController.md) | View controllers, navigation, lifecycle |
 | Constraints | [Constraints.md](Constraints.md) | Auto Layout constraint system |
+| Cursor | [Cursor.md](Cursor.md) | MacTahoe cursor pack at 24 px, synced with the color scheme |
 
 ## Fullscreen / Maximize
 
@@ -170,6 +171,7 @@ App (event loop, window, CSS)
 - [Shader.md](Shader.md) -- GPU shader system
 - [ViewController.md](ViewController.md) -- screen management
 - [Constraints.md](Constraints.md) -- layout system
+- [Cursor.md](Cursor.md) -- cursor theme sync
 
 ## Toolkit Identity
 
@@ -203,6 +205,10 @@ over time:
 
 ## Changelog
 
+- 2026-09-12: Cursor theme sync (`Cursor.md`): every app points GTK and the
+  Xcursor environment at the MacTahoe pack (`MacTahoe-dark-cursors` /
+  `MacTahoe-cursors`) at `24` px, so hover and resize cursors keep the same
+  size and color as the compositor. Resize handles keep their shape cursors.
 - 2026-09-11: Smooth scrolling in every scroll container (`ScrollView`,
   `ListView`, `App` scroll wrapper). A capture-phase scroll controller
   animates discrete   wheel ticks with an ease-out-cubic settle instead of
