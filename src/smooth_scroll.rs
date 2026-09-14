@@ -132,9 +132,10 @@ pub fn scroll_direction_blocked(delta: f64, current: f64, lower: f64, upper: f64
 /// Enable smooth animated scrolling on a `ScrolledWindow`.
 ///
 /// Installs a capture-phase scroll controller that animates discrete wheel
-/// ticks and passes touchpad pixel deltas through 1:1. Safe to call on any
-/// `ScrolledWindow`; also enables kinetic and overlay scrolling and removes
-/// the overshoot/undershoot edge effects.
+/// ticks and passes touchpad pixel deltas through 1:1. Also handles smooth
+/// scroll events from mice and touchpads while the pointer is in motion.
+/// Safe to call on any `ScrolledWindow`; also enables kinetic and overlay
+/// scrolling and removes the overshoot/undershoot edge effects.
 pub fn apply_smooth_scrolling(scrolled: &gtk::ScrolledWindow) {
     scrolled.set_kinetic_scrolling(true);
     scrolled.set_overlay_scrolling(true);
@@ -142,8 +143,7 @@ pub fn apply_smooth_scrolling(scrolled: &gtk::ScrolledWindow) {
 
     let state = Rc::new(RefCell::new(ScrollAnim::default()));
     let controller = gtk::EventControllerScroll::new(
-        gtk::EventControllerScrollFlags::BOTH_AXES
-            | gtk::EventControllerScrollFlags::DISCRETE,
+        gtk::EventControllerScrollFlags::BOTH_AXES,
     );
     // Capture runs before ScrolledWindow's internal bubble-phase controller,
     // so returning Stop below replaces the instant jump with our animation.
