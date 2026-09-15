@@ -132,10 +132,10 @@ pub fn scroll_direction_blocked(delta: f64, current: f64, lower: f64, upper: f64
 /// Enable smooth animated scrolling on a `ScrolledWindow`.
 ///
 /// Installs a capture-phase scroll controller that animates discrete wheel
-/// ticks and passes touchpad pixel deltas through 1:1. Also handles smooth
-/// scroll events from mice and touchpads while the pointer is in motion.
-/// Safe to call on any `ScrolledWindow`; also enables kinetic and overlay
-/// scrolling and removes the overshoot/undershoot edge effects.
+/// ticks and lets smooth/touchpad scroll events pass through to GTK's native
+/// handler — so scrolling works while the pointer is in motion. Safe to call
+/// on any `ScrolledWindow`; also enables kinetic and overlay scrolling and
+/// removes the overshoot/undershoot edge effects.
 pub fn apply_smooth_scrolling(scrolled: &gtk::ScrolledWindow) {
     scrolled.set_kinetic_scrolling(true);
     scrolled.set_overlay_scrolling(true);
@@ -165,10 +165,12 @@ pub fn apply_smooth_scrolling(scrolled: &gtk::ScrolledWindow) {
         let h_upper = (hadj.upper() - hadj.page_size()).max(h_lower);
 
         if matches!(controller.unit(), gtk::gdk::ScrollUnit::Surface) {
-            // Touchpad: apply pixel deltas directly (native smooth feel) and
-            // keep the animation target in sync so a running wheel animation
-            // does not yank the content back. At the limits the event bubbles
-            // so outer scroll views keep chaining.
+            // Touchpad / smooth-scroll mouse: apply pixel deltas directly
+            // (native smooth feel) and keep the animation target in sync so
+            // the next discrete wheel tick animates from the live position.
+            // Return Proceed so GTK's internal ScrolledWindow handler runs
+            // — this is the only path that keeps scrolling alive while the
+            // pointer is in motion.
             if scroll_direction_blocked(dy, vadj.value(), v_lower, v_upper)
                 && scroll_direction_blocked(dx, hadj.value(), h_lower, h_upper)
             {
@@ -178,16 +180,18 @@ pub fn apply_smooth_scrolling(scrolled: &gtk::ScrolledWindow) {
             let h = clamp_target(hadj.value() + dx, hadj.lower(), hadj.upper(), hadj.page_size());
             vadj.set_value(v);
             hadj.set_value(h);
+            // Sync the animation origin/target so the next discrete tick
+            // starts from the live position instead of a stale one.
             let mut s = state.borrow_mut();
             s.v_from = v;
             s.v_to = v;
             s.h_from = h;
             s.h_to = h;
-            return glib::Propagation::Stop;
+            return glib::Propagation::Proceed;
         }
 
-        // Mouse wheel: expand discrete steps to pixels and animate. At the
-        // limits the event bubbles so outer scroll views keep chaining.
+        // Mouse wheel (discrete): expand steps to pixels and animate.
+        // Return Stop to block GTK's instant-jump handler.
         let dy_px = dy * wheel_step(vadj.step_increment());
         let dx_px = dx * wheel_step(hadj.step_increment());
         if scroll_direction_blocked(dy_px, vadj.value(), v_lower, v_upper)
